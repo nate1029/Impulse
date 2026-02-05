@@ -1,0 +1,58 @@
+{
+  "name": "arduino-ide-cursor",
+  "version": "1.0.0",
+  "description": "AI-powered Arduino IDE alternative with intelligent error detection",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [
+    "arduino",
+    "iot",
+    "ide",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "@google/generative-ai": "^0.24.1",
+    "@serialport/parser-readline": "^12.0.0",
+    "chokidar": "^3.5.3",
+    "electron-store": "^8.1.0",
+    "node-pty": "^1.0.0",
+    "openai": "^4.20.0",
+    "serialport": "^12.0.0",
+    "sql.js": "^1.10.3"
+  },
+  "build": {
+    "appId": "com.arduinoidecursor.app",
+    "productName": "Arduino IDE Cursor",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

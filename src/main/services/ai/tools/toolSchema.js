@@ -1,0 +1,425 @@
+/**
+ * Tool Schema Definitions
+ * Structured tool instructions that the AI Agent can output
+ */
+
+const TOOL_SCHEMA = {
+  // Arduino Operations
+  COMPILE_SKETCH: {
+    name: 'compile_sketch',
+    description: 'Compile an Arduino sketch using Arduino CLI. If sketchPath or boardFQBN are omitted, uses the currently open sketch and selected board from the IDE.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sketchPath: {
+          type: 'string',
+          description: 'Full path to the .ino sketch file. Optional: uses currently open sketch if omitted.'
+        },
+        boardFQBN: {
+          type: 'string',
+          description: 'Fully Qualified Board Name (e.g., arduino:avr:uno). Optional: uses selected board if omitted.'
+        }
+      },
+      required: []
+    }
+  },
+
+  UPLOAD_SKETCH: {
+    name: 'upload_sketch',
+    description: 'Upload compiled code to an Arduino board. If sketchPath, boardFQBN, or port are omitted, uses the currently open sketch, selected board, and selected port from the IDE.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sketchPath: {
+          type: 'string',
+          description: 'Full path to the .ino sketch file. Optional: uses currently open sketch if omitted.'
+        },
+        boardFQBN: {
+          type: 'string',
+          description: 'Fully Qualified Board Name. Optional: uses selected board if omitted.'
+        },
+        port: {
+          type: 'string',
+          description: 'Serial port (e.g., COM3, /dev/ttyUSB0). Optional: uses selected port if omitted.'
+        }
+      },
+      required: []
+    }
+  },
+
+  LIST_BOARDS: {
+    name: 'list_boards',
+    description: 'List all available Arduino boards',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  LIST_PORTS: {
+    name: 'list_ports',
+    description: 'List all available serial ports',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  // Serial Monitor Operations
+  CONNECT_SERIAL: {
+    name: 'connect_serial',
+    description: 'Connect to a serial port for monitoring',
+    parameters: {
+      type: 'object',
+      properties: {
+        port: {
+          type: 'string',
+          description: 'Serial port path'
+        },
+        baudRate: {
+          type: 'number',
+          description: 'Baud rate (common: 9600, 115200)',
+          default: 115200
+        }
+      },
+      required: ['port']
+    }
+  },
+
+  DISCONNECT_SERIAL: {
+    name: 'disconnect_serial',
+    description: 'Disconnect from serial port',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  SEND_SERIAL: {
+    name: 'send_serial',
+    description: 'Send data to the connected serial port',
+    parameters: {
+      type: 'object',
+      properties: {
+        data: {
+          type: 'string',
+          description: 'Data to send'
+        }
+      },
+      required: ['data']
+    }
+  },
+
+  READ_SERIAL: {
+    name: 'read_serial',
+    description: 'Read recent serial monitor output',
+    parameters: {
+      type: 'object',
+      properties: {
+        lines: {
+          type: 'number',
+          description: 'Number of recent lines to read',
+          default: 50
+        }
+      }
+    }
+  },
+
+  AUTO_DETECT_BAUD: {
+    name: 'auto_detect_baud',
+    description: 'Automatically detect the correct baud rate for a serial port',
+    parameters: {
+      type: 'object',
+      properties: {
+        port: {
+          type: 'string',
+          description: 'Serial port path'
+        }
+      },
+      required: ['port']
+    }
+  },
+
+  // Baud Rate Operations
+  GET_BAUD_RATE: {
+    name: 'get_baud_rate',
+    description: 'Get the current baud rate setting for serial communication',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  SET_BAUD_RATE: {
+    name: 'set_baud_rate',
+    description: 'Set the baud rate for serial communication. Common rates: 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000, 500000, 1000000, 2000000',
+    parameters: {
+      type: 'object',
+      properties: {
+        baudRate: {
+          type: 'number',
+          description: 'The baud rate to set (e.g., 9600, 115200)'
+        }
+      },
+      required: ['baudRate']
+    }
+  },
+
+  GET_AVAILABLE_BAUD_RATES: {
+    name: 'get_available_baud_rates',
+    description: 'Get list of all available baud rate options',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  // Code Editor Operations
+  GET_EDITOR_CODE: {
+    name: 'get_editor_code',
+    description: 'Get the current code content from the editor',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  SET_EDITOR_CODE: {
+    name: 'set_editor_code',
+    description: 'Replace the entire code content in the editor',
+    parameters: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description: 'The new code to set in the editor'
+        }
+      },
+      required: ['code']
+    }
+  },
+
+  EDIT_CODE: {
+    name: 'edit_code',
+    description: 'Edit specific lines or sections of code in the editor. Can insert, replace, or delete code.',
+    parameters: {
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          description: 'Operation type: "replace", "insert", or "delete"',
+          enum: ['replace', 'insert', 'delete']
+        },
+        startLine: {
+          type: 'number',
+          description: 'Starting line number (1-indexed)'
+        },
+        endLine: {
+          type: 'number',
+          description: 'Ending line number (1-indexed, inclusive). For insert, this is ignored.'
+        },
+        newCode: {
+          type: 'string',
+          description: 'New code to insert or replace with. Not needed for delete.'
+        }
+      },
+      required: ['operation', 'startLine']
+    }
+  },
+
+  SEARCH_CODE: {
+    name: 'search_code',
+    description: 'Search for text or patterns in the current editor code',
+    parameters: {
+      type: 'object',
+      properties: {
+        searchText: {
+          type: 'string',
+          description: 'Text or regex pattern to search for'
+        },
+        isRegex: {
+          type: 'boolean',
+          description: 'Whether to treat searchText as a regex pattern',
+          default: false
+        }
+      },
+      required: ['searchText']
+    }
+  },
+
+  REPLACE_IN_CODE: {
+    name: 'replace_in_code',
+    description: 'Find and replace text in the editor code',
+    parameters: {
+      type: 'object',
+      properties: {
+        searchText: {
+          type: 'string',
+          description: 'Text to find'
+        },
+        replaceText: {
+          type: 'string',
+          description: 'Text to replace with'
+        },
+        replaceAll: {
+          type: 'boolean',
+          description: 'Replace all occurrences or just the first',
+          default: false
+        }
+      },
+      required: ['searchText', 'replaceText']
+    }
+  },
+
+  GET_CURRENT_SKETCH_PATH: {
+    name: 'get_current_sketch_path',
+    description: 'Get the file path of the currently open sketch',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+
+  SAVE_SKETCH: {
+    name: 'save_sketch',
+    description: 'Save the current editor content to the sketch file',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Optional file path. If not provided, saves to current sketch path.'
+        }
+      }
+    }
+  },
+
+  // Analysis Operations
+  ANALYZE_ERROR: {
+    name: 'analyze_error',
+    description: 'Analyze an error message and suggest fixes',
+    parameters: {
+      type: 'object',
+      properties: {
+        errorMessage: {
+          type: 'string',
+          description: 'The error message to analyze'
+        },
+        context: {
+          type: 'object',
+          description: 'Additional context (sketch path, board type, etc.)'
+        }
+      },
+      required: ['errorMessage']
+    }
+  },
+
+  SEARCH_MEMORY: {
+    name: 'search_memory',
+    description: 'Search the error memory database for similar past errors',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Error message or pattern to search for'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results',
+          default: 10
+        }
+      },
+      required: ['query']
+    }
+  },
+
+  RECORD_FIX: {
+    name: 'record_fix',
+    description: 'Record a successful fix to the memory database',
+    parameters: {
+      type: 'object',
+      properties: {
+        errorSignature: {
+          type: 'string',
+          description: 'Signature/pattern of the error'
+        },
+        fix: {
+          type: 'string',
+          description: 'The fix that resolved the error'
+        },
+        context: {
+          type: 'object',
+          description: 'Additional context (board, sketch, etc.)'
+        }
+      },
+      required: ['errorSignature', 'fix']
+    }
+  },
+
+  // Get Current State
+  GET_CURRENT_STATE: {
+    name: 'get_current_state',
+    description: 'Get the current application state including selected board, port, baud rate, serial connection status, and open sketch path',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  }
+};
+
+const DEBUG_TOOL_NAMES = ['analyze_error', 'search_memory', 'record_fix'];
+
+/**
+ * Get all available tools as an array
+ */
+function getAllTools() {
+  return Object.values(TOOL_SCHEMA);
+}
+
+/**
+ * Get tools for debug mode (analysis and memory only)
+ */
+function getDebugTools() {
+  return Object.values(TOOL_SCHEMA).filter(t => DEBUG_TOOL_NAMES.includes(t.name));
+}
+
+/**
+ * Get tool by name
+ */
+function getTool(name) {
+  return Object.values(TOOL_SCHEMA).find(tool => tool.name === name);
+}
+
+/**
+ * Validate tool call structure
+ */
+function validateToolCall(toolCall) {
+  if (!toolCall.name) {
+    return { valid: false, error: 'Tool name is required' };
+  }
+
+  const tool = getTool(toolCall.name);
+  if (!tool) {
+    return { valid: false, error: `Unknown tool: ${toolCall.name}` };
+  }
+
+  // Validate required parameters
+  if (tool.parameters.required) {
+    for (const param of tool.parameters.required) {
+      if (!(param in toolCall.arguments)) {
+        return { valid: false, error: `Missing required parameter: ${param}` };
+      }
+    }
+  }
+
+  return { valid: true };
+}
+
+module.exports = {
+  TOOL_SCHEMA,
+  getAllTools,
+  getDebugTools,
+  getTool,
+  validateToolCall
+};

@@ -1,4 +1,4 @@
-# Arduino IDE Cursor
+# Impulse IDE
 
 An AI-powered desktop application that acts as a "Cursor for Arduino / IoT" - providing intelligent compilation, upload, serial monitoring, and error detection capabilities.
 

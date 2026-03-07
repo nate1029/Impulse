@@ -73,18 +73,6 @@ function createWindow() {
   });
 
   const isDev = process.argv.includes('--dev');
-  if (isDev) {
-    // Open DevTools once after the renderer is attached.
-    // Calling openDevTools() twice can crash on some Electron/Windows builds.
-    mainWindow.webContents.once('did-finish-load', () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      try {
-        mainWindow.webContents.openDevTools({ mode: 'detach' });
-      } catch (err) {
-        console.warn('Failed to open DevTools:', err.message);
-      }
-    });
-  }
 
   // Load the renderer:
   // - Dev mode (--dev): connect to Vite dev server for HMR

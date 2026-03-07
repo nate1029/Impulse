@@ -42,7 +42,6 @@
     "@anthropic-ai/sdk": "^0.20.0",
     "@google/generative-ai": "^0.24.1",
     "@rollup/rollup-win32-x64-msvc": "^4.57.1",
-    "@serialport/parser-readline": "^12.0.0",
     "chokidar": "^3.5.3",
     "codemirror": "^5.65.18",
     "electron-store": "^8.1.0",
@@ -50,7 +49,6 @@
     "node-pty": "^1.1.0",
     "openai": "^4.20.0",
     "serialport": "^12.0.0",
-    "sql.js": "^1.10.3",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.29",
     "zod": "^3.23.8"

@@ -1,218 +1,174 @@
 # Impulse IDE
 
-An AI-powered desktop application for Arduino / IoT development — intelligent compilation, upload, serial monitoring, and error detection. (Also known as Arduino IDE Cursor.)
+An AI-native desktop IDE for Arduino development, built with Electron + Vite.
 
-## Features
+Impulse IDE combines Arduino CLI workflows (compile/upload/board and library management) with an integrated AI assistant, serial tooling, and a modern multi-panel editor experience.
 
-- ✅ **Compile Arduino Sketches** - Uses Arduino CLI to compile sketches
-- ✅ **Upload to Boards** - Upload compiled code to Arduino boards
-- ✅ **Serial Monitor** - Real-time serial communication with automatic baud rate detection
-- ✅ **Error Detection & Memory** - Intelligent error analysis with growing memory of past errors and fixes
-- ✅ **Modern UI** - Clean, dark-themed interface built with Electron
-- ✅ **Windows Executable** - Packaged as .exe for easy distribution
+## Why This Exists
 
-## Prerequisites
+- Fast local Arduino workflow with no cloud lock-in for core IDE tasks
+- AI assistant that can reason over your current IDE state and invoke tools
+- Secure Electron architecture (`preload` bridge + IPC validation)
+- Cross-platform packaging with `electron-builder`
 
-1. **Arduino CLI** - Must be installed and available in your PATH
-   - Download from: https://arduino.github.io/arduino-cli/
-   - Or install via: `winget install Arduino.ArduinoCLI` (Windows)
+## Core Capabilities
 
-2. **Node.js** - Version 16 or higher
-   - Download from: https://nodejs.org/
+- Compile and upload sketches via `arduino-cli`
+- Board, port, core, and library workflows from the UI
+- Real-time serial monitor with reconnect-aware behavior
+- AI assistant with multi-provider support (OpenAI, Gemini, Claude)
+- Structured IPC layer with schema validation (`zod`)
+- Auto-update integration (safe no-op in dev mode)
 
-## Installation
+## Tech Stack
 
-1. Clone or download this repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+- `electron` / `electron-builder`
+- `vite` (renderer build/dev server)
+- `codemirror` (editor)
+- `serialport` (serial I/O)
+- `zod` (IPC payload validation)
+- `electron-store` (local settings/key metadata)
 
-## Development
+## Project Layout
 
-Run the application in development mode:
+```text
+src/
+  main/
+    main.js                 # Electron bootstrap + window/service wiring
+    preload.js              # Secure renderer bridge
+    ipc/                    # Feature-specific IPC handlers
+    services/
+      arduinoService.js     # arduino-cli orchestration
+      serialMonitor.js      # serial connection lifecycle + events
+      ai/                   # agent, providers, tools, prompting, memory
+    utils/                  # logging, validation, notifications, error handling
+  renderer/
+    index.html              # app shell
+    main.js                 # Vite entrypoint
+    renderer.js             # main UI controller
+    styles.css              # UI system and themes
+docs/
+  BUILD_AND_SIGN.md         # packaging/signing notes
+  RELEASE.md                # release process
+```
+
+## Quick Start
+
+### 1) Prerequisites
+
+- Node.js 18+ (recommended)
+- Arduino CLI in `PATH`
+  - Windows: `winget install Arduino.ArduinoCLI`
+  - Verify: `arduino-cli version`
+
+### 2) Install
+
+```bash
+npm install
+```
+
+### 3) Run in Development
+
 ```bash
 npm run dev
 ```
 
-Run the application normally:
+This starts:
+
+- Vite dev server (renderer)
+- Electron main process with `--dev`
+
+### 4) Run Production-like Desktop Build Locally
+
 ```bash
 npm start
 ```
 
-## Building
+## Build and Ship
 
-Build a Windows executable:
-```bash
-npm run build:win
-```
+- Windows: `npm run build:win`
+- macOS: `npm run build:mac`
+- Linux: `npm run build:linux`
+- All targets: `npm run build:all`
 
-The executable will be created in the `dist` folder. The packaged app has **no CDN dependency**: CodeMirror and fonts are bundled; the app runs offline. For code signing (to avoid Windows SmartScreen warnings) and clean-machine testing, see [docs/BUILD_AND_SIGN.md](docs/BUILD_AND_SIGN.md). Release and changelog process: [docs/RELEASE.md](docs/RELEASE.md).
+Artifacts are created in `dist/`.
 
-## Usage
+For signing and release details, see:
 
-### First Time Setup
+- [docs/BUILD_AND_SIGN.md](docs/BUILD_AND_SIGN.md)
+- [docs/RELEASE.md](docs/RELEASE.md)
 
-1. Launch the application
-2. Click "Check Arduino CLI" to verify Arduino CLI is installed
-3. If not installed, install Arduino CLI and ensure it's in your PATH
+## Scripts
 
-### Compiling a Sketch
+- `npm run dev` - Vite + Electron dev mode
+- `npm start` - launch Electron app
+- `npm run build:renderer` - build renderer bundle only
+- `npm run build` - renderer build + electron-builder
+- `npm run test` - Jest tests
+- `npm run lint` - ESLint checks
 
-1. Enter the full path to your `.ino` sketch file (or click Browse)
-2. Select your Arduino board from the dropdown
-3. Click "Compile" to compile your sketch
-4. View compilation output in the "Compilation Output" panel
+## AI Assistant Architecture (At a Glance)
 
-### Uploading to Board
+The assistant lives in `src/main/services/ai/` and is orchestrated by `agent.js`.
 
-1. Ensure your sketch is compiled successfully
-2. Select the COM port where your Arduino is connected
-3. Click "Upload" to upload the compiled code to your board
+- Provider abstraction: `providers/baseProvider.js`
+- Provider implementations:
+  - `providers/openaiProvider.js`
+  - `providers/geminiProvider.js`
+  - `providers/claudeProvider.js`
+- Tool contracts: `tools/toolSchema.js`
+- Tool execution/router: `tools/toolExecutor.js`
+- Persistent lightweight memory: `memory/simpleMemory.js`
+- Prompt strategy: `prompts/systemPrompt.js`
 
-### Serial Monitor
+### Agent Modes
 
-1. Select the serial port from the dropdown
-2. Choose the baud rate (default: 115200)
-3. Click "Connect" to start monitoring
-4. View incoming data in real-time
-5. Type messages in the input field and click "Send" to send data to the board
+- `agent` - tool-enabled execution
+- `ask` - no tool execution, direct model response
+- `debug` - debugging-oriented behavior with targeted tools
 
-### Error Analysis
+## Security Model
 
-- When compilation or upload fails, the error is automatically analyzed
-- The system checks its memory for similar past errors
-- Suggested fixes are displayed with confidence scores
-- Error history is maintained and can be viewed in the "Error History" panel
-
-## Usage Examples
-
-### Opening a sketch from the renderer (preload API)
-The renderer uses `window.electronAPI` (exposed via preload). Example: open a file and read it.
-```javascript
-const result = await window.electronAPI.dialog.openFile();
-if (result.success && result.filePath) {
-  const fileResult = await window.electronAPI.file.read(result.filePath);
-  if (fileResult.success) console.log(fileResult.content);
-}
-```
-
-### Compiling and uploading
-```javascript
-const boardFQBN = 'arduino:avr:uno';
-const port = 'COM3';
-const compileResult = await window.electronAPI.arduino.compile(sketchPath, boardFQBN);
-if (compileResult.success) {
-  const uploadResult = await window.electronAPI.arduino.upload(sketchPath, boardFQBN, port);
-}
-```
-
-### AI assistant (after setting a model and API key)
-```javascript
-const result = await window.electronAPI.ai.processQuery('Why does my LED not blink?', { code: editorCode, hasFileOpen: true }, 'agent');
-if (result.success && result.data?.response) console.log(result.data.response);
-```
-
-## Debug logging
-
-To enable debug logs (function entry/exit and timing for IPC handlers), set the environment variable before starting the app:
-- **Windows (PowerShell):** `$env:IMPULSE_IDE_DEBUG="1"; npm run dev`
-- **Windows (CMD):** `set IMPULSE_IDE_DEBUG=1 && npm run dev`
-- **macOS/Linux:** `IMPULSE_IDE_DEBUG=1 npm run dev`
-
-Logs are written to the terminal where you started the app.
-
-## Testing and lint
-
-```bash
-npm run test   # Run Jest tests (IPC validation schemas)
-npm run lint   # Run ESLint on src/main
-```
-
-## Architecture
-
-### Main Process (`src/main/`)
-- `main.js` - Electron main process; creates window and registers IPC
-- `preload.js` - Secure bridge between main and renderer (exposes `electronAPI`)
-- `ipc/` - IPC handlers by feature (shell, UI, arduino, serial, dialog, file, lib, errors, AI, API keys); input validated with Zod
-- `utils/logger.js` - Debug logging (behind `IMPULSE_IDE_DEBUG`)
-- `services/arduinoService.js` - Arduino CLI integration
-- `services/serialMonitor.js` - Serial port communication
-- `services/errorMemory.js` - Error detection and memory system
-- `services/ai/` - AI agent, providers (OpenAI, Gemini, Claude), tools, memory
-
-### Renderer Process (`src/renderer/`)
-- `index.html` - Application UI structure
-- `styles.css` - Application styling
-- `renderer.js` - Frontend logic and UI interactions
-
-## How It Works
-
-### Arduino CLI Integration
-The application uses Arduino CLI (not the Arduino IDE executable) to:
-- Compile sketches
-- Upload code to boards
-- List available boards and ports
-- Manage Arduino cores and libraries
-
-### Serial Monitor
-- Uses `serialport` library for cross-platform serial communication
-- Supports automatic baud rate detection
-- Real-time data streaming with timestamps
-
-### Error Memory System
-- Stores errors in JSON format in user's app data directory
-- Extracts error patterns (undefined references, compilation errors, etc.)
-- Matches new errors with past errors
-- Suggests fixes based on historical data
-- Learns from user-provided fixes
-
-## Dependencies (package.json)
-
-| Package | Purpose | Note |
-|--------|---------|------|
-| `zod` | Runtime input validation for IPC | Used in `src/main/ipc/schemas.js`; safe defaults on invalid input |
-| `electron`, `electron-builder` | App and build | Required |
-| `@anthropic-ai/sdk`, `@google/generative-ai`, `openai` | AI providers | Used by AI agent |
-| `serialport`, `@serialport/parser-readline` | Serial monitor | Required for serial I/O |
-| `electron-store` | Settings storage | Used for preferences |
-| `chokidar` | File watching | Used for project/file tree |
-| `sql.js` | SQLite in-memory | Used by `services/ai/memory/aiMemory.js` (optional AI memory backend) |
-| `node-pty` | Terminal emulation | Reserved for future features (e.g. integrated terminal); not used by current UI. Can be removed if you do not plan to add a terminal. |
-
-**Suggestions:**  
-- **node-pty**: Optional. Remove from `dependencies` if you do not need an integrated terminal to reduce install size and native rebuilds.  
-- Run `npm audit` and consider `npm audit fix` for reported vulnerabilities (avoid `--force` unless you accept breaking changes).
-
-## Configuration
-
-Error memory is stored in:
-- **Windows**: `%APPDATA%\arduino-ide-cursor\error-memory.json`
-- **macOS**: `~/Library/Preferences/arduino-ide-cursor/error-memory.json`
-- **Linux**: `~/.config/arduino-ide-cursor/error-memory.json`
+- Renderer has no direct Node access
+- All privileged actions cross `preload.js` + validated IPC
+- IPC payloads validated in `src/main/ipc/schemas.js`
+- External side effects are centralized in main-process services
 
 ## Troubleshooting
 
-### Arduino CLI Not Found
-- Ensure Arduino CLI is installed
-- Verify it's in your system PATH
-- Try running `arduino-cli version` in a terminal to verify
+### `npm run dev` fails during Electron startup
 
-### Serial Port Issues
-- Ensure no other application is using the serial port
-- Check device manager (Windows) to verify the port exists
-- Try disconnecting and reconnecting the Arduino
+- Confirm dependencies are installed: `npm install`
+- Rebuild native modules if needed: `npm run postinstall`
+- Verify CLI: `arduino-cli version`
 
-### Compilation Errors
-- Verify the sketch path is correct
-- Ensure the selected board matches your hardware
-- Check that required libraries are installed via Arduino CLI
+### Arduino CLI not found
+
+- Install Arduino CLI and ensure it is in `PATH`
+- Restart terminal/IDE after installation
+
+### Serial monitor issues
+
+- Ensure port is not busy in another app
+- Reconnect USB device and refresh ports
+- Check board/driver visibility in Device Manager (Windows)
+
+### Renderer not loading in dev
+
+- Confirm Vite is up on `http://localhost:5173`
+- If port is occupied, free it or change Vite port and dev command accordingly
+
+## For AI Agents and Automation
+
+If you are an AI agent operating on this repo, prioritize this workflow:
+
+1. Read `package.json` scripts and `src/main/main.js` wiring.
+2. Treat `src/main/ipc/` as the contract boundary.
+3. Keep renderer logic in `src/renderer/` and privileged actions in `src/main/services/`.
+4. Prefer additive, schema-validated IPC changes over ad-hoc event channels.
+5. Run `npm run lint` and targeted tests after substantial edits.
+6. Avoid committing generated artifacts unless explicitly requested.
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-

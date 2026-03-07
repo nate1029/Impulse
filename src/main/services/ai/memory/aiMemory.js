@@ -14,16 +14,29 @@ class AIMemory {
     this.db = null;
     this.SQL = null;
     this.initialized = false;
+    this._dirty = false;
+    this._saveTimer = null;
+    this._saveIntervalMs = 5000; // Debounce: flush to disk at most every 5s
   }
 
   getDatabasePath() {
-    const appDataDir = process.env.APPDATA || 
-      (process.platform === 'darwin' 
-        ? path.join(process.env.HOME, 'Library/Preferences')
-        : path.join(process.env.HOME, '.config'));
-    
-    const dbDir = path.join(appDataDir, 'arduino-ide-cursor');
-    return path.join(dbDir, 'ai-memory.db');
+    let appDataDir;
+    try {
+      const { app } = require('electron');
+      if (app && typeof app.getPath === 'function') {
+        appDataDir = app.getPath('userData');
+      }
+    } catch (_) { /* not in Electron */ }
+    if (!appDataDir) {
+      appDataDir = path.join(
+        process.env.APPDATA ||
+          (process.platform === 'darwin'
+            ? path.join(process.env.HOME, 'Library/Preferences')
+            : path.join(process.env.HOME, '.config')),
+        'arduino-ide-cursor'
+      );
+    }
+    return path.join(appDataDir, 'ai-memory.db');
   }
 
   async initialize() {
@@ -32,7 +45,7 @@ class AIMemory {
     try {
       // Initialize sql.js with error handling
       this.SQL = await initSqlJs({
-        locateFile: (file) => {
+        locateFile: (_file) => {
           // Try to locate the wasm file in node_modules
           const wasmPath = path.join(__dirname, '../../../node_modules/sql.js/dist/sql-wasm.wasm');
           return wasmPath;
@@ -83,7 +96,7 @@ class AIMemory {
   async run(sql, params = []) {
     if (!(await this.ensureInitialized())) return;
     this.db.run(sql, params);
-    await this.saveDatabase();
+    this._scheduleSave();
   }
 
   async get(sql, params = []) {
@@ -110,15 +123,50 @@ class AIMemory {
   async exec(sql) {
     if (!(await this.ensureInitialized())) return;
     this.db.run(sql);
-    await this.saveDatabase();
+    this._scheduleSave();
   }
 
-  async saveDatabase() {
-    if (this.db) {
-      const data = this.db.export();
-      const buffer = Buffer.from(data);
-      await fs.writeFile(this.dbPath, buffer);
+  /**
+   * Schedule a debounced write to disk.
+   * Batches multiple writes within _saveIntervalMs into a single I/O operation.
+   */
+  _scheduleSave() {
+    this._dirty = true;
+    if (!this._saveTimer) {
+      this._saveTimer = setTimeout(async () => {
+        this._saveTimer = null;
+        if (this._dirty) {
+          await this._flushToDisk();
+        }
+      }, this._saveIntervalMs);
     }
+  }
+
+  /**
+   * Immediately flush the database to disk.
+   */
+  async _flushToDisk() {
+    if (this.db) {
+      try {
+        const data = this.db.export();
+        const buffer = Buffer.from(data);
+        await fs.writeFile(this.dbPath, buffer);
+        this._dirty = false;
+      } catch (error) {
+        console.error('Failed to save AI Memory database:', error.message);
+      }
+    }
+  }
+
+  /**
+   * Public save method — forces immediate flush (used on shutdown).
+   */
+  async saveDatabase() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    await this._flushToDisk();
   }
 
   async createTables() {

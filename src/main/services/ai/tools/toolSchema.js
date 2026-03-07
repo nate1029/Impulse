@@ -177,7 +177,7 @@ const TOOL_SCHEMA = {
   // Code Editor Operations
   GET_EDITOR_CODE: {
     name: 'get_editor_code',
-    description: 'Get the current code content from the editor',
+    description: 'Get the current code content from the editor. If the result is empty or whitespace-only, the user has no code yet—use set_editor_code to write code when they ask for it.',
     parameters: {
       type: 'object',
       properties: {}
@@ -186,7 +186,7 @@ const TOOL_SCHEMA = {
 
   SET_EDITOR_CODE: {
     name: 'set_editor_code',
-    description: 'Replace the entire code content in the editor',
+    description: 'Replace the entire code content in the editor. Use when the editor is empty and the user asks for code, or after confirming replacement of existing code.',
     parameters: {
       type: 'object',
       properties: {
@@ -364,6 +364,26 @@ const TOOL_SCHEMA = {
     parameters: {
       type: 'object',
       properties: {}
+    }
+  },
+
+  // Playground — hardware task instructions
+  UPDATE_PLAYGROUND: {
+    name: 'update_playground',
+    description: 'Display hardware instructions in the Playground tab. Use this to tell the user what physical steps to perform: wiring, component placement, connections, circuit setup, breadboard layout, pin mapping, etc. Content is shown as text in the Playground panel at the bottom of the IDE.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: {
+          type: 'string',
+          description: 'The hardware instructions or task description to display. Can include wiring steps, pin connections, component lists, or any physical setup instructions.'
+        },
+        append: {
+          type: 'boolean',
+          description: 'If true (default), appends to existing playground content. If false, replaces all existing content.'
+        }
+      },
+      required: ['content']
     }
   }
 };

@@ -13,13 +13,13 @@ class ToolExecutor {
     this.aiMemory = aiMemory;
     this.serialBuffer = []; // Buffer for serial output
     this.maxBufferSize = 1000; // Maximum lines to buffer
-    
+
     // UI state callbacks - set by the main process
     this.uiCallbacks = null;
-    
+
     // Available baud rates
     this.availableBaudRates = [
-      300, 1200, 2400, 4800, 9600, 19200, 38400, 
+      300, 1200, 2400, 4800, 9600, 19200, 38400,
       57600, 74880, 115200, 230400, 250000, 500000, 1000000, 2000000
     ];
   }
@@ -132,6 +132,11 @@ class ToolExecutor {
           result = await this.executeGetCurrentState();
           break;
 
+        // Playground Operations
+        case 'update_playground':
+          result = await this.executeUpdatePlayground(toolCall.arguments);
+          break;
+
         default:
           return {
             success: false,
@@ -140,9 +145,12 @@ class ToolExecutor {
           };
       }
 
-      // Record execution in memory
+      // Record execution in memory (matches aiMemory.recordExecution(toolCall, result) signature)
       if (this.aiMemory && this.aiMemory.recordExecution) {
-        await this.aiMemory.recordExecution(toolCall.name, toolCall.arguments, result.success !== false, result.error);
+        await this.aiMemory.recordExecution(
+          { name: toolCall.name, arguments: toolCall.arguments },
+          { success: result.success !== false, error: result.error, executionTime: result.executionTime }
+        );
       }
 
       return {
@@ -237,7 +245,8 @@ class ToolExecutor {
       const uploadResult = await this.arduinoService.upload(sketchPath, boardFQBN, port);
       return {
         output: uploadResult.output,
-        port: uploadResult.port,
+        port: uploadResult.port ?? port,
+        boardFQBN,
         success: true,
         message: uploadResult.message || 'Upload complete'
       };
@@ -264,11 +273,16 @@ class ToolExecutor {
   async executeConnectSerial(args) {
     const { port, baudRate = 115200 } = args;
     await this.serialMonitor.connect(port, baudRate);
-    
+
+    // Remove previous listener to prevent duplicates/leaks
+    if (this._serialDataHandler) {
+      this.serialMonitor.removeListener('data', this._serialDataHandler);
+    }
     // Set up listener to buffer serial data
-    this.serialMonitor.on('data', (data) => {
+    this._serialDataHandler = (data) => {
       this.addToBuffer(data);
-    });
+    };
+    this.serialMonitor.on('data', this._serialDataHandler);
 
     return {
       port,
@@ -299,10 +313,10 @@ class ToolExecutor {
 
   async executeAutoDetectBaud(args) {
     const { port } = args;
-    
+
     if (this.serialMonitor.tryBaudRates) {
       const detectedBaud = await this.serialMonitor.tryBaudRates(port);
-      
+
       if (detectedBaud) {
         return {
           success: true,
@@ -311,7 +325,7 @@ class ToolExecutor {
         };
       }
     }
-    
+
     return {
       success: false,
       error: 'Could not detect baud rate',
@@ -325,18 +339,18 @@ class ToolExecutor {
       const baudRate = await this.uiCallbacks.getBaudRate();
       return { baudRate };
     }
-    
+
     // Fallback to serial monitor's current baud rate
     if (this.serialMonitor && this.serialMonitor.currentBaudRate) {
       return { baudRate: this.serialMonitor.currentBaudRate };
     }
-    
+
     return { baudRate: null, error: 'No baud rate information available' };
   }
 
   async executeSetBaudRate(args) {
     const { baudRate } = args;
-    
+
     // Validate baud rate
     if (!this.availableBaudRates.includes(baudRate)) {
       return {
@@ -344,12 +358,12 @@ class ToolExecutor {
         error: `Invalid baud rate: ${baudRate}. Available rates: ${this.availableBaudRates.join(', ')}`
       };
     }
-    
+
     if (this.uiCallbacks && this.uiCallbacks.setBaudRate) {
       await this.uiCallbacks.setBaudRate(baudRate);
       return { success: true, baudRate };
     }
-    
+
     return { success: false, error: 'Unable to set baud rate - UI callback not available' };
   }
 
@@ -363,59 +377,59 @@ class ToolExecutor {
       const code = await this.uiCallbacks.getEditorCode();
       return { code };
     }
-    
+
     return { code: null, error: 'Unable to get editor code - UI callback not available' };
   }
 
   async executeSetEditorCode(args) {
     const { code } = args;
-    
+
     if (this.uiCallbacks && this.uiCallbacks.setEditorCode) {
       await this.uiCallbacks.setEditorCode(code);
       return { success: true };
     }
-    
+
     return { success: false, error: 'Unable to set editor code - UI callback not available' };
   }
 
   async executeEditCode(args) {
     const { operation, startLine, endLine, newCode } = args;
-    
+
     if (!this.uiCallbacks || !this.uiCallbacks.getEditorCode || !this.uiCallbacks.setEditorCode) {
       return { success: false, error: 'Unable to edit code - UI callbacks not available' };
     }
-    
+
     const currentCode = await this.uiCallbacks.getEditorCode();
     const lines = currentCode.split('\n');
-    
+
     // Convert to 0-indexed
     const start = startLine - 1;
     const end = endLine ? endLine - 1 : start;
-    
+
     let newLines;
-    
+
     switch (operation) {
       case 'replace':
         const codeLines = newCode ? newCode.split('\n') : [];
         newLines = [...lines.slice(0, start), ...codeLines, ...lines.slice(end + 1)];
         break;
-        
+
       case 'insert':
         const insertLines = newCode ? newCode.split('\n') : [];
         newLines = [...lines.slice(0, start), ...insertLines, ...lines.slice(start)];
         break;
-        
+
       case 'delete':
         newLines = [...lines.slice(0, start), ...lines.slice(end + 1)];
         break;
-        
+
       default:
         return { success: false, error: `Unknown operation: ${operation}` };
     }
-    
+
     const newCodeStr = newLines.join('\n');
     await this.uiCallbacks.setEditorCode(newCodeStr);
-    
+
     return {
       success: true,
       operation,
@@ -426,27 +440,27 @@ class ToolExecutor {
 
   async executeSearchCode(args) {
     const { searchText, isRegex = false } = args;
-    
+
     if (!this.uiCallbacks || !this.uiCallbacks.getEditorCode) {
       return { success: false, error: 'Unable to search code - UI callback not available' };
     }
-    
+
     const code = await this.uiCallbacks.getEditorCode();
     const lines = code.split('\n');
     const matches = [];
-    
+
     const regex = isRegex ? new RegExp(searchText, 'gi') : null;
-    
+
     lines.forEach((line, index) => {
       let found = false;
-      
+
       if (isRegex) {
         found = regex.test(line);
         regex.lastIndex = 0; // Reset regex state
       } else {
         found = line.toLowerCase().includes(searchText.toLowerCase());
       }
-      
+
       if (found) {
         matches.push({
           lineNumber: index + 1,
@@ -454,7 +468,7 @@ class ToolExecutor {
         });
       }
     });
-    
+
     return {
       searchText,
       matchCount: matches.length,
@@ -464,15 +478,15 @@ class ToolExecutor {
 
   async executeReplaceInCode(args) {
     const { searchText, replaceText, replaceAll = false } = args;
-    
+
     if (!this.uiCallbacks || !this.uiCallbacks.getEditorCode || !this.uiCallbacks.setEditorCode) {
       return { success: false, error: 'Unable to replace in code - UI callbacks not available' };
     }
-    
+
     const code = await this.uiCallbacks.getEditorCode();
     let newCode;
     let count = 0;
-    
+
     if (replaceAll) {
       const regex = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
       count = (code.match(regex) || []).length;
@@ -486,9 +500,9 @@ class ToolExecutor {
         newCode = code;
       }
     }
-    
+
     await this.uiCallbacks.setEditorCode(newCode);
-    
+
     return {
       success: true,
       searchText,
@@ -502,38 +516,38 @@ class ToolExecutor {
       const path = await this.uiCallbacks.getCurrentSketchPath();
       return { path };
     }
-    
+
     return { path: null, error: 'Unable to get sketch path - UI callback not available' };
   }
 
   async executeSaveSketch(args) {
     const { path } = args;
-    
+
     if (this.uiCallbacks && this.uiCallbacks.saveSketch) {
       await this.uiCallbacks.saveSketch(path);
       return { success: true, path };
     }
-    
+
     return { success: false, error: 'Unable to save sketch - UI callback not available' };
   }
 
   // Analysis Operation Implementations
   async executeAnalyzeError(args) {
     const { errorMessage, context } = args;
-    
+
     // First, search memory for similar errors
     let memoryResults = [];
     if (this.aiMemory && this.aiMemory.searchSimilarErrors) {
       memoryResults = await this.aiMemory.searchSimilarErrors(errorMessage);
     }
-    
+
     // Use error memory service for pattern extraction
     let analyzedError = { suggestions: [] };
     if (this.errorMemory) {
       const error = new Error(errorMessage);
       analyzedError = await this.errorMemory.analyzeError(error);
     }
-    
+
     return {
       errorMessage,
       context,
@@ -545,23 +559,23 @@ class ToolExecutor {
 
   async executeSearchMemory(args) {
     const { query, limit = 10 } = args;
-    
+
     if (this.aiMemory && this.aiMemory.searchSimilarErrors) {
       const results = await this.aiMemory.searchSimilarErrors(query, limit);
       return { results };
     }
-    
+
     return { results: [] };
   }
 
   async executeRecordFix(args) {
     const { errorSignature, fix, context } = args;
-    
+
     if (this.aiMemory && this.aiMemory.recordFix) {
       const record = await this.aiMemory.recordFix(errorSignature, fix, context);
       return { record };
     }
-    
+
     return { success: false, error: 'Memory not available' };
   }
 
@@ -573,7 +587,7 @@ class ToolExecutor {
       availableBaudRates: this.availableBaudRates,
       currentSerialBaudRate: this.serialMonitor ? this.serialMonitor.currentBaudRate : null
     };
-    
+
     // Get UI state if available
     if (this.uiCallbacks) {
       if (this.uiCallbacks.getBaudRate) {
@@ -589,8 +603,24 @@ class ToolExecutor {
         state.selectedPort = await this.uiCallbacks.getSelectedPort();
       }
     }
-    
+
     return state;
+  }
+
+  // Playground Operations
+  async executeUpdatePlayground(args) {
+    const { content, append = true } = args;
+
+    if (!content || typeof content !== 'string') {
+      return { success: false, error: 'Content is required and must be a string' };
+    }
+
+    if (this.uiCallbacks && this.uiCallbacks.setPlayground) {
+      await this.uiCallbacks.setPlayground(content, append);
+      return { success: true, message: 'Playground updated' };
+    }
+
+    return { success: false, error: 'Unable to update playground - UI callback not available' };
   }
 
   // Helper Methods
@@ -600,9 +630,9 @@ class ToolExecutor {
       data: data.data || data,
       baudRate: data.baudRate
     };
-    
+
     this.serialBuffer.push(entry);
-    
+
     // Maintain buffer size
     if (this.serialBuffer.length > this.maxBufferSize) {
       this.serialBuffer.shift();

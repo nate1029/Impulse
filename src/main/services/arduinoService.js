@@ -1,8 +1,8 @@
-const { spawn, exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const ErrorHandler = require('../utils/errorHandler');
+const notifications = require('../utils/notifications');
 
 /**
  * Arduino CLI Service
@@ -12,39 +12,69 @@ const fs = require('fs').promises;
  * 1️⃣ Command Builder - constructs CLI commands with correct flags
  * 2️⃣ Process Runner - executes commands, captures stdout/stderr
  * 3️⃣ Output Parser - interprets results, detects success/failure
+ * 
+ * SECURITY: All CLI commands use spawn() with argument arrays.
+ * Never use shell string interpolation with user-controlled input.
  */
 class ArduinoService {
   constructor() {
     this.cliPath = 'arduino-cli';
     this.coreIndexed = false;
-    // Increase buffer for large outputs (50MB for board lists)
-    this.maxBuffer = 50 * 1024 * 1024; // 50MB buffer
   }
 
   // ==================== 2️⃣ Process Runner ====================
-  
-  async runCommand(command, options = {}) {
-    const execOptions = {
-      maxBuffer: this.maxBuffer,
-      ...options
-    };
-    
-    try {
-      const { stdout, stderr } = await execAsync(command, execOptions);
-      return { success: true, stdout, stderr };
-    } catch (error) {
-      return { 
-        success: false, 
-        stdout: error.stdout || '', 
-        stderr: error.stderr || error.message,
-        code: error.code
-      };
-    }
+
+  /**
+   * Safe command runner using spawn() with argument arrays.
+   * NEVER passes user input through a shell.
+   * @param {string[]} args - Array of arguments for arduino-cli
+   * @param {Object} options - spawn options (cwd, timeout, etc.)
+   * @returns {Promise<{success: boolean, stdout: string, stderr: string, code?: number}>}
+   */
+  async runCommand(args, options = {}) {
+    return new Promise((resolve) => {
+      const proc = spawn(this.cliPath, args, {
+        windowsHide: true,
+        ...options
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve({ success: true, stdout, stderr });
+        } else {
+          resolve({ success: false, stdout, stderr, code });
+        }
+      });
+
+      proc.on('error', (error) => {
+        resolve({
+          success: false,
+          stdout: '',
+          stderr: error.message,
+          code: error.code
+        });
+      });
+
+      // Default 60s timeout to avoid hung processes
+      const timeout = options.timeout || 60000;
+      setTimeout(() => {
+        if (!proc.killed) {
+          proc.kill();
+          resolve({ success: false, stdout, stderr: 'Command timed out', code: 'TIMEOUT' });
+        }
+      }, timeout);
+    });
   }
 
   async checkCLI() {
     try {
-      const result = await this.runCommand(`${this.cliPath} version`);
+      const result = await this.runCommand(['version']);
       return result.success && result.stdout.trim().length > 0;
     } catch (error) {
       return false;
@@ -55,42 +85,11 @@ class ArduinoService {
     if (this.coreIndexed) return;
     
     try {
-      await this.runCommand(`${this.cliPath} core update-index`);
+      await this.runCommand(['core', 'update-index']);
       this.coreIndexed = true;
     } catch (error) {
       console.warn('Failed to update core index:', error.message);
     }
-  }
-
-  // ==================== 1️⃣ Command Builder ====================
-
-  buildCompileCommand(sketchPath, boardFQBN, options = {}) {
-    const args = [
-      'compile',
-      '--fqbn', boardFQBN,
-      '--verbose'
-    ];
-    
-    if (options.outputDir) {
-      args.push('--output-dir', options.outputDir);
-    }
-    
-    args.push(sketchPath);
-    
-    return `${this.cliPath} ${args.join(' ')}`;
-  }
-
-  buildUploadCommand(sketchPath, boardFQBN, port, options = {}) {
-    const args = [
-      'upload',
-      '--fqbn', boardFQBN,
-      '--port', port,
-      '--verbose'
-    ];
-    
-    args.push(sketchPath);
-    
-    return `${this.cliPath} ${args.join(' ')}`;
   }
 
   // ==================== 3️⃣ Output Parser ====================
@@ -229,7 +228,7 @@ class ArduinoService {
       }
       
       // Check for errors (but not false positives like "error correction")
-      for (const { pattern, type } of errorPatterns) {
+      for (const { pattern } of errorPatterns) {
         if (pattern.test(line)) {
           // Exclude false positives
           if (!lowerLine.includes('error correction') && 
@@ -332,7 +331,7 @@ class ArduinoService {
    * List boards using spawn to handle large outputs
    */
   async listBoardsWithSpawn() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       const args = ['board', 'listall', '--format', 'json'];
       const boardProcess = spawn(this.cliPath, args);
       
@@ -410,7 +409,7 @@ class ArduinoService {
    */
   async listPorts() {
     try {
-      const result = await this.runCommand(`${this.cliPath} board list --format json`);
+      const result = await this.runCommand(['board', 'list', '--format', 'json']);
       
       if (!result.success) {
         throw new Error(result.stderr);
@@ -463,143 +462,259 @@ class ArduinoService {
    * Compile an Arduino sketch
    */
   async compile(sketchPath, boardFQBN) {
-    if (!sketchPath || !boardFQBN) {
-      throw new Error('Sketch path and board FQBN are required');
-    }
-
-    if (!this.validateFQBN(boardFQBN)) {
-      throw new Error(`Invalid FQBN format: "${boardFQBN}". Expected format: vendor:architecture:board (e.g., arduino:avr:uno)`);
-    }
-
-    // Verify sketch exists
     try {
-      await fs.access(sketchPath);
-    } catch (error) {
-      throw new Error(`Sketch not found: ${sketchPath}`);
-    }
-
-    await this.ensureCoreIndexed();
-
-    return new Promise((resolve, reject) => {
-      const args = [
-        'compile',
-        '--fqbn', boardFQBN,
-        '--verbose',
-        sketchPath
-      ];
-
-      const compileProcess = spawn(this.cliPath, args, {
-        cwd: path.dirname(sketchPath)
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      compileProcess.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      compileProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      compileProcess.on('close', (code) => {
-        // Use the output parser
-        const parsed = this.parseCompileOutput(stdout, stderr);
-        
-        if (code === 0 || parsed.success) {
-          resolve({
-            success: true,
-            output: stdout,
-            warnings: parsed.warnings,
-            programSize: parsed.programSize,
-            usagePercent: parsed.usagePercent,
-            message: parsed.message
-          });
-        } else {
-          reject(new Error(parsed.message || `Compilation failed with code ${code}`));
+      // Input validation with user-friendly messages
+      const validation = ErrorHandler.validateInput(
+        { sketchPath, boardFQBN },
+        {
+          sketchPath: { required: true, type: 'string', minLength: 1 },
+          boardFQBN: { required: true, type: 'string', pattern: /^[^:]+:[^:]+:[^:]+$/ }
         }
+      );
+
+      if (!validation.valid) {
+        throw new Error(`Invalid input: ${validation.errors.join(', ')}`);
+      }
+
+      if (!this.validateFQBN(boardFQBN)) {
+        throw new Error(`Invalid FQBN format: "${boardFQBN}". Expected format: vendor:architecture:board (e.g., arduino:avr:uno)`);
+      }
+
+      // Verify sketch exists
+      try {
+        await fs.access(sketchPath);
+      } catch (error) {
+        throw new Error(`Sketch file not found: ${sketchPath}. Please check the file path.`);
+      }
+
+      // Check if Arduino CLI is available
+      if (!await this.checkCLI()) {
+        throw new Error('Arduino CLI is not available. Please install Arduino CLI and ensure it is in your PATH.');
+      }
+
+      await this.ensureCoreIndexed();
+
+      // Show progress notification
+      const progressId = notifications.progress('Compiling sketch...', 0);
+
+      return new Promise((resolve, reject) => {
+        const args = [
+          'compile',
+          '--fqbn', boardFQBN,
+          '--verbose',
+          sketchPath
+        ];
+
+        const compileProcess = spawn(this.cliPath, args, {
+          cwd: path.dirname(sketchPath),
+          timeout: 120000 // 2 minute timeout
+        });
+
+        let stdout = '';
+        let stderr = '';
+        let progress = 10;
+
+        const updateProgress = () => {
+          progress = Math.min(progress + 10, 90);
+          notifications.updateProgress(progressId, progress);
+        };
+
+        const progressInterval = setInterval(updateProgress, 2000);
+
+        compileProcess.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        compileProcess.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        compileProcess.on('close', (code) => {
+          clearInterval(progressInterval);
+          notifications.dismiss(progressId);
+
+          // Use the output parser
+          const parsed = this.parseCompileOutput(stdout, stderr);
+          
+          if (code === 0 || parsed.success) {
+            notifications.success('Sketch compiled successfully!');
+            resolve({
+              success: true,
+              output: stdout,
+              warnings: parsed.warnings,
+              programSize: parsed.programSize,
+              usagePercent: parsed.usagePercent,
+              message: parsed.message || 'Compilation completed successfully'
+            });
+          } else {
+            const errorMessage = parsed.message || `Compilation failed with exit code ${code}`;
+            notifications.error(`Compilation failed: ${errorMessage}`);
+            reject(new Error(errorMessage));
+          }
+        });
+
+        compileProcess.on('error', (error) => {
+          clearInterval(progressInterval);
+          notifications.dismiss(progressId);
+          
+          const friendlyError = new Error(`Failed to start compilation: ${error.message}`);
+          notifications.error('Failed to start compilation process');
+          reject(friendlyError);
+        });
+
+        // Handle timeout
+        setTimeout(() => {
+          if (!compileProcess.killed) {
+            compileProcess.kill();
+            clearInterval(progressInterval);
+            notifications.dismiss(progressId);
+            notifications.error('Compilation timed out after 2 minutes');
+            reject(new Error('Compilation timed out. The sketch may be too complex or there may be an issue with the Arduino CLI.'));
+          }
+        }, 120000);
       });
 
-      compileProcess.on('error', (error) => {
-        reject(new Error(`Failed to start compilation: ${error.message}`));
+    } catch (error) {
+      return ErrorHandler.handle(error, 'Arduino Compile', {
+        userMessage: ErrorHandler.getFriendlyMessage(error, 'compile'),
+        metadata: { sketchPath, boardFQBN }
       });
-    });
+    }
   }
 
   /**
    * Upload to Arduino board
    */
   async upload(sketchPath, boardFQBN, port) {
-    if (!sketchPath || !boardFQBN || !port) {
-      throw new Error('Sketch path, board FQBN, and port are required');
-    }
-
-    if (!this.validateFQBN(boardFQBN)) {
-      throw new Error(`Invalid FQBN format: "${boardFQBN}". Expected format: vendor:architecture:board`);
-    }
-
-    // First compile
-    await this.compile(sketchPath, boardFQBN);
-
-    return new Promise((resolve, reject) => {
-      const args = [
-        'upload',
-        '--fqbn', boardFQBN,
-        '--port', port,
-        '--verbose',
-        sketchPath
-      ];
-
-      const uploadProcess = spawn(this.cliPath, args, {
-        cwd: path.dirname(sketchPath)
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      uploadProcess.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      uploadProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      uploadProcess.on('close', (code) => {
-        // Use the output parser
-        const parsed = this.parseUploadOutput(stdout, stderr);
-        
-        // Success if exit code is 0 OR parser detected success
-        // (some boards return non-zero but upload successfully)
-        const isSuccess = code === 0 || parsed.success;
-        
-        // Only fail if we have explicit errors and no success indicators
-        const hasCriticalErrors = parsed.errors.some(e => 
-          /fatal|failed|cannot connect|access denied|permission denied/i.test(e)
-        );
-        
-        if (isSuccess && !hasCriticalErrors) {
-          resolve({
-            success: true,
-            output: stdout + '\n' + stderr,
-            port: port,
-            message: parsed.message || 'Upload complete',
-            warnings: parsed.warnings
-          });
-        } else {
-          // Provide detailed error message
-          const errorMsg = parsed.errors.length > 0 
-            ? parsed.errors.join('\n') 
-            : (parsed.message || `Upload failed with exit code ${code}`);
-          reject(new Error(errorMsg));
+    try {
+      // Input validation
+      const validation = ErrorHandler.validateInput(
+        { sketchPath, boardFQBN, port },
+        {
+          sketchPath: { required: true, type: 'string', minLength: 1 },
+          boardFQBN: { required: true, type: 'string', pattern: /^[^:]+:[^:]+:[^:]+$/ },
+          port: { required: true, type: 'string', minLength: 1 }
         }
+      );
+
+      if (!validation.valid) {
+        throw new Error(`Invalid input: ${validation.errors.join(', ')}`);
+      }
+
+      if (!this.validateFQBN(boardFQBN)) {
+        throw new Error(`Invalid FQBN format: "${boardFQBN}". Expected format: vendor:architecture:board`);
+      }
+
+      // Check if port exists
+      const availablePorts = await this.listPorts();
+      const portExists = availablePorts.some(p => p.port === port);
+      if (!portExists) {
+        throw new Error(`Port ${port} is not available. Please check if your device is connected.`);
+      }
+
+      // First compile
+      const compileResult = await this.compile(sketchPath, boardFQBN);
+      if (!compileResult.success) {
+        throw new Error('Compilation failed. Cannot upload without successful compilation.');
+      }
+
+      // Show upload progress
+      const progressId = notifications.progress('Uploading to board...', 0);
+
+      return new Promise((resolve, reject) => {
+        const args = [
+          'upload',
+          '--fqbn', boardFQBN,
+          '--port', port,
+          '--verbose',
+          sketchPath
+        ];
+
+        const uploadProcess = spawn(this.cliPath, args, {
+          cwd: path.dirname(sketchPath),
+          timeout: 60000 // 1 minute timeout for upload
+        });
+
+        let stdout = '';
+        let stderr = '';
+        let progress = 10;
+
+        const updateProgress = () => {
+          progress = Math.min(progress + 15, 90);
+          notifications.updateProgress(progressId, progress);
+        };
+
+        const progressInterval = setInterval(updateProgress, 1000);
+
+        uploadProcess.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        uploadProcess.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        uploadProcess.on('close', (code) => {
+          clearInterval(progressInterval);
+          notifications.dismiss(progressId);
+
+          // Use the output parser
+          const parsed = this.parseUploadOutput(stdout, stderr);
+          
+          // Success if exit code is 0 OR parser detected success
+          const isSuccess = code === 0 || parsed.success;
+          
+          // Only fail if we have explicit errors and no success indicators
+          const hasCriticalErrors = parsed.errors.some(e => 
+            /fatal|failed|cannot connect|access denied|permission denied/i.test(e)
+          );
+          
+          if (isSuccess && !hasCriticalErrors) {
+            notifications.success(`Successfully uploaded to ${port}!`);
+            resolve({
+              success: true,
+              output: stdout + '\n' + stderr,
+              port: port,
+              message: parsed.message || 'Upload completed successfully',
+              warnings: parsed.warnings
+            });
+          } else {
+            // Provide detailed error message
+            const errorMsg = parsed.errors.length > 0 
+              ? parsed.errors.join('\n') 
+              : (parsed.message || `Upload failed with exit code ${code}`);
+            notifications.error(`Upload failed: ${errorMsg}`);
+            reject(new Error(errorMsg));
+          }
+        });
+
+        uploadProcess.on('error', (error) => {
+          clearInterval(progressInterval);
+          notifications.dismiss(progressId);
+          
+          const friendlyError = new Error(`Failed to start upload: ${error.message}`);
+          notifications.error('Failed to start upload process');
+          reject(friendlyError);
+        });
+
+        // Handle timeout
+        setTimeout(() => {
+          if (!uploadProcess.killed) {
+            uploadProcess.kill();
+            clearInterval(progressInterval);
+            notifications.dismiss(progressId);
+            notifications.error('Upload timed out after 1 minute');
+            reject(new Error('Upload timed out. Please check your connection and try again.'));
+          }
+        }, 60000);
       });
 
-      uploadProcess.on('error', (error) => {
-        reject(new Error(`Failed to start upload: ${error.message}`));
+    } catch (error) {
+      return ErrorHandler.handle(error, 'Arduino Upload', {
+        userMessage: ErrorHandler.getFriendlyMessage(error, 'upload'),
+        metadata: { sketchPath, boardFQBN, port }
       });
-    });
+    }
   }
 
   /**
@@ -662,7 +777,7 @@ class ArduinoService {
    * Update the library index (call before search for fresh results)
    */
   async libUpdateIndex() {
-    const result = await this.runCommand(`${this.cliPath} lib update-index`);
+    const result = await this.runCommand(['lib', 'update-index']);
     return result.success;
   }
 
@@ -733,7 +848,7 @@ class ArduinoService {
    * List installed libraries. Returns { installed_libraries: [{ name, author, version, sentence, ... }] }
    */
   async libList() {
-    const result = await this.runCommand(`${this.cliPath} lib list --format json`);
+    const result = await this.runCommand(['lib', 'list', '--format', 'json']);
     if (!result.success) {
       throw new Error(result.stderr || 'Library list failed');
     }
@@ -764,11 +879,177 @@ class ArduinoService {
   async libUninstall(libName) {
     const name = String(libName || '').trim();
     if (!name) throw new Error('Library name is required');
-    const result = await this.runCommand(`${this.cliPath} lib uninstall "${name}"`);
+    const result = await this.runCommand(['lib', 'uninstall', name]);
     if (!result.success) {
       throw new Error(result.stderr || result.stdout || 'Uninstall failed');
     }
     return { success: true };
+  }
+
+  // ==================== Core / Board Manager ====================
+
+  /**
+   * Search installable cores (Boards Manager). Keyword optional.
+   * Returns [{ id, name, latest, installed }] or similar.
+   */
+  async coreSearch(keyword = '') {
+    await this.ensureCoreIndexed();
+    const args = ['core', 'search', '--format', 'json'];
+    if (keyword && String(keyword).trim()) args.push(String(keyword).trim());
+    const result = await this.runCommand(args);
+    if (!result.success) {
+      throw new Error(result.stderr || 'Core search failed');
+    }
+    try {
+      const data = JSON.parse(result.stdout);
+      const raw = Array.isArray(data) ? data : (data?.platforms || data?.cores || data?.results || []);
+      return this._normalizeCoreSearchResults(raw);
+    } catch (e) {
+      throw new Error(`Parse core search: ${e.message}`);
+    }
+  }
+
+  _normalizeCoreSearchResults(platforms) {
+    if (!Array.isArray(platforms)) return [];
+    return platforms.map(p => {
+      const id = p.id || p.platform?.id || '';
+      const releases = p.releases || {};
+      const versions = Object.keys(releases);
+      const latestVer = versions.length ? versions[versions.length - 1] : '';
+      const release = latestVer ? releases[latestVer] : null;
+      const name = release?.name || p.name || p.platform?.name || id;
+      return { id, name, latest: latestVer };
+    }).filter(p => p.id);
+  }
+
+  /**
+   * List installed cores. Returns array of { id, name, installed, latest }.
+   */
+  async coreList() {
+    const result = await this.runCommand(['core', 'list', '--format', 'json']);
+    if (!result.success) {
+      return [];
+    }
+    try {
+      const data = JSON.parse(result.stdout);
+      const raw = Array.isArray(data) ? data : (data?.installed_platforms || data?.platforms || []);
+      return Array.isArray(raw) ? raw.map(p => ({
+        id: p.id || p.platform?.id || p.name,
+        name: p.name || p.platform?.name || p.id,
+        installed: p.installed || p.version || ''
+      })) : [];
+    } catch (e) {
+      console.warn('Parse core list:', e.message);
+      return [];
+    }
+  }
+
+  /**
+   * Install a core. coreId e.g. "arduino:avr", "esp32:esp32"
+   */
+  async coreInstall(coreId) {
+    const id = String(coreId || '').trim();
+    if (!id) throw new Error('Core ID is required (e.g. arduino:avr or esp32:esp32)');
+    return new Promise((resolve, reject) => {
+      const args = ['core', 'install', '--format', 'json', id];
+      const proc = spawn(this.cliPath, args);
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', d => { stdout += d.toString(); });
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+      proc.on('close', code => {
+        if (code === 0) {
+          this.coreIndexed = true;
+          resolve({ success: true, output: stdout + stderr });
+        } else {
+          reject(new Error(stderr || stdout || `Core install failed with code ${code}`));
+        }
+      });
+      proc.on('error', err => reject(new Error(`Failed to run: ${err.message}`)));
+    });
+  }
+
+  /**
+   * Uninstall a core. coreId e.g. "arduino:avr", "esp32:esp32"
+   */
+  async coreUninstall(coreId) {
+    const id = String(coreId || '').trim();
+    if (!id) throw new Error('Core ID is required');
+    const result = await this.runCommand(['core', 'uninstall', id]);
+    if (!result.success) {
+      throw new Error(result.stderr || result.stdout || 'Core uninstall failed');
+    }
+    return { success: true };
+  }
+
+  /**
+   * List example sketches. If libraryName is given, only that library's examples.
+   * Returns array of { name, library, path } or similar (path to example folder).
+   */
+  async libExamples(libraryName = '') {
+    const args = ['lib', 'examples'];
+    if (libraryName && String(libraryName).trim()) args.push(String(libraryName).trim());
+    args.push('--format', 'json');
+    const result = await this.runCommand(args);
+    if (!result.success) {
+      try {
+        const text = (result.stdout || result.stderr || '').trim();
+        if (!text) return [];
+        return this._parseLibExamplesText(text);
+      } catch (_) {
+        return [];
+      }
+    }
+    try {
+      const data = JSON.parse(result.stdout);
+      if (Array.isArray(data)) return data;
+      if (data.examples && Array.isArray(data.examples)) return data.examples;
+      return [];
+    } catch (e) {
+      return this._parseLibExamplesText(result.stdout || '');
+    }
+  }
+
+  _parseLibExamplesText(text) {
+    const out = [];
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    let currentLib = '';
+    for (const line of lines) {
+      if (line.includes(' ') && (line.endsWith('.ino') || line.includes('/') || line.includes('\\'))) {
+        const path = line.replace(/^[\s\S]*?\s+/, '').trim();
+        if (path) out.push({ name: path.split(/[/\\]/).pop() || path, library: currentLib, path });
+      } else if (line) {
+        currentLib = line;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Get all library examples with full paths (using install_dir from lib list + fs).
+   * Returns [{ name, library, path }] where path is the example folder.
+   */
+  async libExamplesWithPaths(libraryFilter = '') {
+    const libList = await this.libList();
+    const libs = libList.installed_libraries || [];
+    const results = [];
+    for (const lib of libs) {
+      const installDir = lib.install_dir || lib.installDir;
+      if (!installDir || (libraryFilter && !lib.name.toLowerCase().includes(String(libraryFilter).toLowerCase()))) continue;
+      const examplesDir = path.join(installDir, 'examples');
+      try {
+        const entries = await fs.readdir(examplesDir, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.isDirectory()) {
+            const examplePath = path.join(examplesDir, e.name);
+            results.push({ name: e.name, library: lib.name, path: examplePath });
+          }
+        }
+      } catch (_) {
+        // no examples folder or not readable
+      }
+    }
+    return results.sort((a, b) => (a.library + a.name).localeCompare(b.library + b.name));
   }
 }
 

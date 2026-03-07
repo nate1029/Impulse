@@ -23,25 +23,25 @@ class BaseProvider {
    * @param {Object} options - Additional options (temperature, max_tokens, etc.)
    * @returns {Promise<Object>} Response with content and tool calls
    */
-  async chat(messages, options = {}) {
+  async chat(messages, _options = {}) {
     throw new Error('chat() must be implemented by provider');
   }
 
   /**
    * Format tool definitions for provider-specific schema
-   * @param {Array} tools - Array of tool definitions
+   * @param {Array} _tools - Array of tool definitions
    * @returns {Object} Provider-specific tool format
    */
-  formatTools(tools) {
+  formatTools(_tools) {
     throw new Error('formatTools() must be implemented by provider');
   }
 
   /**
    * Parse tool calls from provider response
-   * @param {Object} response - Provider response object
+   * @param {Object} _response - Provider response object
    * @returns {Array} Array of tool call objects
    */
-  parseToolCalls(response) {
+  parseToolCalls(_response) {
     throw new Error('parseToolCalls() must be implemented by provider');
   }
 

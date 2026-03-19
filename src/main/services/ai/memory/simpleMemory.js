@@ -19,12 +19,23 @@ class SimpleMemory {
   }
 
   getMemoryPath() {
-    const appDataDir = process.env.APPDATA || 
-      (process.platform === 'darwin' 
-        ? path.join(process.env.HOME, 'Library/Preferences')
-        : path.join(process.env.HOME, '.config'));
-    
-    return path.join(appDataDir, 'arduino-ide-cursor', 'memory.json');
+    let appDataDir;
+    try {
+      const { app } = require('electron');
+      if (app && typeof app.getPath === 'function') {
+        appDataDir = app.getPath('userData');
+      }
+    } catch (_) { /* not in Electron */ }
+    if (!appDataDir) {
+      appDataDir = path.join(
+        process.env.APPDATA ||
+          (process.platform === 'darwin'
+            ? path.join(process.env.HOME, 'Library/Preferences')
+            : path.join(process.env.HOME, '.config')),
+        'arduino-ide-cursor'
+      );
+    }
+    return path.join(appDataDir, 'memory.json');
   }
 
   async ensureLoaded() {
@@ -144,9 +155,18 @@ class SimpleMemory {
     return fix;
   }
 
-  async recordExecution(toolName, args, success, error = null) {
+  /**
+   * Record a tool execution. Signature matches aiMemory.recordExecution(toolCall, result)
+   * so toolExecutor can call either SimpleMemory or AIMemory without change.
+   */
+  async recordExecution(toolCall, result) {
     await this.ensureLoaded();
-    
+
+    const toolName = toolCall && typeof toolCall === 'object' ? toolCall.name : String(toolCall);
+    const args = toolCall && typeof toolCall === 'object' ? toolCall.arguments : undefined;
+    const success = result && typeof result === 'object' ? result.success !== false : !!result;
+    const error = result && typeof result === 'object' ? result.error ?? null : null;
+
     this.memory.executions.push({
       tool: toolName,
       args,
@@ -154,12 +174,11 @@ class SimpleMemory {
       error,
       timestamp: new Date().toISOString()
     });
-    
-    // Keep only last 100 executions
+
     if (this.memory.executions.length > 100) {
       this.memory.executions = this.memory.executions.slice(-100);
     }
-    
+
     await this.save();
   }
 

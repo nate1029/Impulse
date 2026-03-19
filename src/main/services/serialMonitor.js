@@ -1,6 +1,5 @@
 const { EventEmitter } = require('events');
 const { SerialPort } = require('serialport');
-const { ReadlineParser } = require('@serialport/parser-readline');
 
 class SerialMonitor extends EventEmitter {
   constructor() {
@@ -11,6 +10,16 @@ class SerialMonitor extends EventEmitter {
     this.currentBaudRate = null;
     this.commonBaudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
     this.autoBaudRateDetection = true;
+
+    // Auto-reconnect state
+    this._autoReconnect = true;
+    this._lastPortPath = null;
+    this._lastBaudRate = null;
+    this._reconnectTimer = null;
+    this._reconnectAttempts = 0;
+    this._maxReconnectAttempts = 20;  // ~60s of trying
+    this._reconnectIntervalMs = 3000; // Poll every 3s
+    this._intentionalDisconnect = false;
   }
 
   async listPorts() {
@@ -63,6 +72,10 @@ class SerialMonitor extends EventEmitter {
       this.port.on('close', () => {
         this.isConnected = false;
         this.emit('disconnected');
+        // Trigger auto-reconnect if disconnect was not intentional (USB yanked)
+        if (this._autoReconnect && !this._intentionalDisconnect && this._lastPortPath) {
+          this._startReconnect();
+        }
       });
 
       // Open the port (using promise-based API)
@@ -78,6 +91,11 @@ class SerialMonitor extends EventEmitter {
 
       this.isConnected = true;
       this.currentBaudRate = baudRate;
+      this._lastPortPath = portPath;
+      this._lastBaudRate = baudRate;
+      this._intentionalDisconnect = false;
+      this._reconnectAttempts = 0;
+      this._stopReconnect();
       this.emit('connected');
     } catch (error) {
       throw new Error(`Failed to create serial connection: ${error.message}`);
@@ -85,6 +103,8 @@ class SerialMonitor extends EventEmitter {
   }
 
   async disconnect() {
+    this._intentionalDisconnect = true;
+    this._stopReconnect();
     return new Promise((resolve) => {
       if (this.port && this.isConnected) {
         this.port.close((error) => {
@@ -168,6 +188,80 @@ class SerialMonitor extends EventEmitter {
    */
   getBaudRate() {
     return this.currentBaudRate;
+  }
+
+  // ==================== Auto-Reconnect ====================
+
+  /**
+   * Start polling for the port to reappear after USB disconnect.
+   * Emits 'reconnecting' with attempt count, and reconnects automatically.
+   */
+  _startReconnect() {
+    if (this._reconnectTimer) return; // Already reconnecting
+    this._reconnectAttempts = 0;
+
+    this.emit('reconnecting', { attempt: 0, port: this._lastPortPath });
+
+    this._reconnectTimer = setInterval(async () => {
+      this._reconnectAttempts++;
+
+      if (this._reconnectAttempts > this._maxReconnectAttempts) {
+        this._stopReconnect();
+        this.emit('reconnect-failed', { port: this._lastPortPath });
+        return;
+      }
+
+      try {
+        // Check if the port has reappeared
+        const ports = await SerialPort.list();
+        const found = ports.some(p => p.path === this._lastPortPath);
+
+        if (found) {
+          this._stopReconnect();
+          this.emit('reconnecting', {
+            attempt: this._reconnectAttempts,
+            port: this._lastPortPath,
+            status: 'port-found'
+          });
+
+          // Small delay to let the OS finish enumerating the device
+          await new Promise(r => setTimeout(r, 1000));
+
+          try {
+            await this.connect(this._lastPortPath, this._lastBaudRate);
+            this.emit('reconnected', { port: this._lastPortPath });
+          } catch (err) {
+            // Port appeared but connection failed — keep trying
+            this._startReconnect();
+          }
+        } else {
+          this.emit('reconnecting', {
+            attempt: this._reconnectAttempts,
+            port: this._lastPortPath,
+            status: 'waiting'
+          });
+        }
+      } catch (err) {
+        // List failed — keep trying
+      }
+    }, this._reconnectIntervalMs);
+  }
+
+  _stopReconnect() {
+    if (this._reconnectTimer) {
+      clearInterval(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+  }
+
+  /**
+   * Enable/disable auto-reconnect
+   */
+  setAutoReconnect(enabled) {
+    this._autoReconnect = enabled;
+    if (!enabled) {
+      this._stopReconnect();
+    }
   }
 }
 

@@ -1,6 +1,5 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const BaseProvider = require('./baseProvider');
-const { getAllTools } = require('../tools/toolSchema');
 
 class GeminiProvider extends BaseProvider {
   static DEFAULT_MODEL = 'gemini-1.5-flash';
@@ -44,14 +43,24 @@ class GeminiProvider extends BaseProvider {
     const modelName = this.model || GeminiProvider.DEFAULT_MODEL;
     
     try {
-      // Get the model - newer SDK handles API version automatically
-      const model = this.genAI.getGenerativeModel({ 
+      // Build model config
+      const modelConfig = { 
         model: modelName,
         generationConfig: {
           temperature: options.temperature || 0.7,
           maxOutputTokens: options.max_tokens || 2000,
         }
-      });
+      };
+
+      // Wire up tools if provided
+      if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+        modelConfig.tools = [{
+          functionDeclarations: this.formatTools(options.tools)
+        }];
+      }
+
+      // Get the model - newer SDK handles API version automatically
+      const model = this.genAI.getGenerativeModel(modelConfig);
 
       // Convert messages to Gemini format
       const { systemInstruction, contents } = this.convertMessagesToGemini(messages);
@@ -63,7 +72,14 @@ class GeminiProvider extends BaseProvider {
       });
 
       const response = result.response;
-      const text = response.text();
+      
+      // response.text() throws if the response only contains function calls
+      let text = '';
+      try {
+        text = response.text();
+      } catch (_) {
+        // No text content (function-call-only response)
+      }
 
       return {
         content: text || '',
@@ -99,14 +115,54 @@ class GeminiProvider extends BaseProvider {
     const contents = [];
     
     for (const msg of messages) {
-      if (!msg.content) continue;
-      
       if (msg.role === 'system') {
         // Gemini 1.5+ supports systemInstruction
-        systemInstruction = msg.content;
-      } else {
+        if (msg.content) systemInstruction = msg.content;
+        continue;
+      }
+
+      if (msg.role === 'tool') {
+        // Tool result message -> Gemini functionResponse
         contents.push({
-          role: msg.role === 'assistant' ? 'model' : 'user',
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: msg.name || 'unknown',
+              response: { result: msg.content || '' }
+            }
+          }]
+        });
+        continue;
+      }
+
+      if (msg.role === 'assistant') {
+        const parts = [];
+        // Add text content if present
+        if (msg.content) {
+          parts.push({ text: msg.content });
+        }
+        // Add function calls if present
+        if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+          for (const tc of msg.tool_calls) {
+            const fn = tc.function || tc;
+            parts.push({
+              functionCall: {
+                name: fn.name,
+                args: typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : (fn.arguments || {})
+              }
+            });
+          }
+        }
+        if (parts.length > 0) {
+          contents.push({ role: 'model', parts });
+        }
+        continue;
+      }
+
+      // User messages
+      if (msg.content) {
+        contents.push({
+          role: 'user',
           parts: [{ text: msg.content }]
         });
       }

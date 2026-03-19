@@ -6,14 +6,19 @@ const readFile = promisify(fs.readFile);
 const writeFile = promisify(fs.writeFile);
 const mkdir = promisify(fs.mkdir);
 
+function getAppDataDir() {
+  try {
+    const { app } = require('electron');
+    if (app && typeof app.getPath === 'function') return app.getPath('userData');
+  } catch (_) { /* not in Electron */ }
+  const fallback = process.env.APPDATA ||
+    (process.platform === 'darwin' ? path.join(process.env.HOME, 'Library/Preferences') : path.join(process.env.HOME, '.config'));
+  return path.join(fallback, 'arduino-ide-cursor');
+}
+
 class ErrorMemory {
   constructor() {
-    this.memoryPath = path.join(
-      process.env.APPDATA || 
-      (process.platform === 'darwin' ? process.env.HOME + '/Library/Preferences' : process.env.HOME + '/.config'),
-      'arduino-ide-cursor',
-      'error-memory.json'
-    );
+    this.memoryPath = path.join(getAppDataDir(), 'error-memory.json');
     this.memory = {
       errors: [],
       patterns: [],

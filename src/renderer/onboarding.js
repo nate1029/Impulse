@@ -1,0 +1,350 @@
+/**
+ * Onboarding System
+ * Guides new users through initial setup
+ */
+
+class OnboardingManager {
+  constructor() {
+    this.steps = [
+      {
+        id: 'welcome',
+        title: 'Welcome to Impulse IDE',
+        content: 'An AI-powered Arduino development environment with intelligent compilation, upload, and error detection.',
+        target: null,
+        position: 'center'
+      },
+      {
+        id: 'check-cli',
+        title: 'Check Arduino CLI',
+        content: 'First, let\'s verify that Arduino CLI is installed on your system.',
+        target: '#cliStatus',
+        position: 'right',
+        action: () => this.checkArduinoCLI()
+      },
+      {
+        id: 'open-sketch',
+        title: 'Open a Sketch',
+        content: 'Click here to open an Arduino sketch file (.ino) or create a new one.',
+        target: '#openFolder',
+        position: 'right'
+      },
+      {
+        id: 'select-board',
+        title: 'Select Board',
+        content: 'Choose your Arduino board from this dropdown. This tells the compiler what type of Arduino you\'re using.',
+        target: '#boardPortDropdown',
+        position: 'bottom'
+      },
+      {
+        id: 'compile-upload',
+        title: 'Compile & Upload',
+        content: 'Use these buttons to verify (compile) your code and upload it to your Arduino board.',
+        target: '#compileBtn',
+        position: 'bottom'
+      },
+      {
+        id: 'ai-assistant',
+        title: 'AI Assistant',
+        content: 'Need help? Click here to open the AI assistant. It can help with code, errors, and Arduino questions.',
+        target: '#aiAgentTab',
+        position: 'left'
+      },
+      {
+        id: 'serial-monitor',
+        title: 'Serial Monitor',
+        content: 'Monitor communication between your computer and Arduino using the serial monitor.',
+        target: '#serialMonitorBtn',
+        position: 'left'
+      }
+    ];
+    
+    this.currentStep = 0;
+    this.isActive = false;
+    this.overlay = null;
+    this.tooltip = null;
+  }
+
+  start(force = false) {
+    // Check if user has seen onboarding before
+    const hasSeenOnboarding = localStorage.getItem('arduino-ide-onboarding-completed');
+    if (hasSeenOnboarding && !force) {
+      return;
+    }
+
+    this.isActive = true;
+    this.currentStep = 0;
+    this.createOverlay();
+    this.showStep(this.currentStep);
+  }
+
+  createOverlay() {
+    // Create overlay
+    this.overlay = document.createElement('div');
+    this.overlay.className = 'onboarding-overlay';
+    document.body.appendChild(this.overlay);
+
+    // Create tooltip
+    this.tooltip = document.createElement('div');
+    this.tooltip.className = 'onboarding-tooltip';
+    document.body.appendChild(this.tooltip);
+
+    // Add event listener (bound so we can remove it later)
+    this._keyHandler = (e) => {
+      if (this.isActive) {
+        if (e.key === 'Escape') {
+          this.skip();
+        } else if (e.key === 'ArrowRight' || e.key === 'Enter') {
+          this.next();
+        } else if (e.key === 'ArrowLeft') {
+          this.previous();
+        }
+      }
+    };
+    document.addEventListener('keydown', this._keyHandler);
+  }
+
+  showStep(stepIndex) {
+    if (stepIndex < 0 || stepIndex >= this.steps.length) {
+      this.complete();
+      return;
+    }
+
+    const step = this.steps[stepIndex];
+    
+    // Clear previous highlights
+    document.querySelectorAll('.onboarding-highlight').forEach(el => {
+      el.classList.remove('onboarding-highlight');
+    });
+
+    // Highlight target element
+    if (step.target) {
+      const targetElement = document.querySelector(step.target);
+      if (targetElement) {
+        targetElement.classList.add('onboarding-highlight');
+        this.positionTooltip(targetElement, step);
+      } else {
+        console.warn(`Onboarding target not found: ${step.target}`);
+        this.positionTooltip(null, step);
+      }
+    } else {
+      this.positionTooltip(null, step);
+    }
+
+    // Update tooltip content
+    this.updateTooltipContent(step, stepIndex);
+
+    // Execute step action if any
+    if (step.action) {
+      setTimeout(() => step.action(), 500);
+    }
+  }
+
+  positionTooltip(targetElement, step) {
+    if (!targetElement || step.position === 'center') {
+      // Center the tooltip
+      this.tooltip.style.position = 'fixed';
+      this.tooltip.style.top = '50%';
+      this.tooltip.style.left = '50%';
+      this.tooltip.style.transform = 'translate(-50%, -50%)';
+      return;
+    }
+
+    const rect = targetElement.getBoundingClientRect();
+    const tooltipRect = this.tooltip.getBoundingClientRect();
+    
+    this.tooltip.style.position = 'fixed';
+    
+    switch (step.position) {
+      case 'top':
+        this.tooltip.style.top = `${rect.top - tooltipRect.height - 10}px`;
+        this.tooltip.style.left = `${rect.left + (rect.width - tooltipRect.width) / 2}px`;
+        break;
+      case 'bottom':
+        this.tooltip.style.top = `${rect.bottom + 10}px`;
+        this.tooltip.style.left = `${rect.left + (rect.width - tooltipRect.width) / 2}px`;
+        break;
+      case 'left':
+        this.tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
+        this.tooltip.style.left = `${rect.left - tooltipRect.width - 10}px`;
+        break;
+      case 'right':
+        this.tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
+        this.tooltip.style.left = `${rect.right + 10}px`;
+        break;
+    }
+
+    // Ensure tooltip stays within viewport
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
+    const currentLeft = parseInt(this.tooltip.style.left);
+    const currentTop = parseInt(this.tooltip.style.top);
+    
+    if (currentLeft < 10) {
+      this.tooltip.style.left = '10px';
+    } else if (currentLeft + tooltipRect.width > viewportWidth - 10) {
+      this.tooltip.style.left = `${viewportWidth - tooltipRect.width - 10}px`;
+    }
+    
+    if (currentTop < 10) {
+      this.tooltip.style.top = '10px';
+    } else if (currentTop + tooltipRect.height > viewportHeight - 10) {
+      this.tooltip.style.top = `${viewportHeight - tooltipRect.height - 10}px`;
+    }
+  }
+
+  updateTooltipContent(step, stepIndex) {
+    const isFirst = stepIndex === 0;
+    const isLast = stepIndex === this.steps.length - 1;
+    
+    this.tooltip.innerHTML = `
+      <div class="onboarding-tooltip-content">
+        <div class="onboarding-tooltip-header">
+          <h3>${step.title}</h3>
+          <button class="onboarding-close" onclick="onboarding.skip()">×</button>
+        </div>
+        <div class="onboarding-tooltip-body">
+          <p>${step.content}</p>
+        </div>
+        <div class="onboarding-tooltip-footer">
+          <div class="onboarding-progress">
+            <span>${stepIndex + 1} of ${this.steps.length}</span>
+            <div class="onboarding-progress-bar">
+              <div class="onboarding-progress-fill" style="width: ${((stepIndex + 1) / this.steps.length) * 100}%"></div>
+            </div>
+          </div>
+          <div class="onboarding-actions">
+            <button class="onboarding-btn secondary" onclick="onboarding.skip()">Skip Tour</button>
+            ${!isFirst ? '<button class="onboarding-btn secondary" onclick="onboarding.previous()">Previous</button>' : ''}
+            <button class="onboarding-btn primary" onclick="onboarding.${isLast ? 'complete' : 'next'}()">
+              ${isLast ? 'Finish' : 'Next'}
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  next() {
+    this.currentStep++;
+    this.showStep(this.currentStep);
+  }
+
+  previous() {
+    this.currentStep--;
+    this.showStep(this.currentStep);
+  }
+
+  skip() {
+    this.complete();
+  }
+
+  complete() {
+    this.isActive = false;
+    
+    // Remove event listener to prevent memory leak
+    if (this._keyHandler) {
+      document.removeEventListener('keydown', this._keyHandler);
+      this._keyHandler = null;
+    }
+
+    // Remove overlay and tooltip
+    if (this.overlay) {
+      this.overlay.remove();
+      this.overlay = null;
+    }
+    
+    if (this.tooltip) {
+      this.tooltip.remove();
+      this.tooltip = null;
+    }
+
+    // Clear highlights
+    document.querySelectorAll('.onboarding-highlight').forEach(el => {
+      el.classList.remove('onboarding-highlight');
+    });
+
+    // Mark as completed
+    localStorage.setItem('arduino-ide-onboarding-completed', 'true');
+
+    // Show completion notification
+    if (window.notifications) {
+      window.notifications.success('Welcome tour completed! You\'re ready to start coding with Arduino.');
+    }
+  }
+
+  async checkArduinoCLI() {
+    try {
+      if (window.electronAPI) {
+        const result = await window.electronAPI.arduino.checkCLI();
+        if (result.success) {
+          window.notifications?.success('Arduino CLI is installed and ready!');
+        } else {
+          window.notifications?.warning('Arduino CLI not found. Please install it to continue.');
+        }
+      }
+    } catch (error) {
+      window.notifications?.error('Failed to check Arduino CLI status.');
+    }
+  }
+
+  // Reset onboarding (for testing or user request)
+  reset() {
+    localStorage.removeItem('arduino-ide-onboarding-completed');
+    this.start(true);
+  }
+
+  // Add tour trigger to help menu
+  addHelpMenuOption() {
+    // Add to help menu if it exists
+    const helpMenu = document.querySelector('[data-menu="help"]');
+    if (helpMenu) {
+      const tourOption = document.createElement('button');
+      tourOption.textContent = 'Take Tour';
+      tourOption.onclick = () => this.start(true);
+      helpMenu.appendChild(tourOption);
+    }
+  }
+}
+
+// Create global instance
+window.onboarding = new OnboardingManager();
+
+// Auto-start onboarding when page loads (only for new users)
+document.addEventListener('DOMContentLoaded', () => {
+  // Delay to ensure UI is fully loaded
+  setTimeout(() => {
+    // Only show tour on first visit
+    const hasSeenOnboarding = localStorage.getItem('arduino-ide-onboarding-completed');
+    const isFirstVisit = !hasSeenOnboarding;
+    
+    if (isFirstVisit) {
+      // Show a less intrusive welcome message first
+      if (window.notifications) {
+        window.notifications.info('Welcome to Arduino IDE Cursor! Click here to take a quick tour.', {
+          duration: 8000,
+          actions: [
+            { 
+              id: 'start-tour', 
+              label: 'Start Tour',
+              callback: () => window.onboarding.start(true)
+            },
+            { 
+              id: 'skip-tour', 
+              label: 'Skip',
+              callback: () => localStorage.setItem('arduino-ide-onboarding-completed', 'true')
+            }
+          ]
+        });
+      } else {
+        // Fallback if notifications aren't available
+        window.onboarding.start();
+      }
+    }
+  }, 2000); // Increased delay to let everything load
+});
+
+// Export for module use
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = OnboardingManager;
+}

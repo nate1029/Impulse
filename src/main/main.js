@@ -1,11 +1,23 @@
+/**
+ * Impulse IDE (Arduino IDE Cursor) - Electron main process.
+ * Creates window, initializes services, and registers IPC handlers.
+ */
+
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const fsp = require('fs').promises;
 const ArduinoService = require('./services/arduinoService');
 const SerialMonitor = require('./services/serialMonitor');
 const ErrorMemory = require('./services/errorMemory');
 const AIAgent = require('./services/ai/agent');
 const APIKeyManager = require('./services/ai/config/apiKeyManager');
+const { registerAllIpc } = require('./ipc');
+const { debug } = require('./utils/logger');
+const notifications = require('./utils/notifications');
+const TerminalService = require('./services/terminal');
+const PluginManager = require('./services/pluginManager');
+const CollaborationService = require('./services/collaboration');
 
 let mainWindow;
 let arduinoService;
@@ -13,9 +25,9 @@ let serialMonitor;
 let errorMemory;
 let aiAgent;
 let apiKeyManager;
+let terminalService;
 
-// Store for UI state that renderer will update
-let uiState = {
+const uiState = {
   currentBaudRate: 115200,
   currentSketchPath: null,
   selectedBoard: null,
@@ -23,6 +35,9 @@ let uiState = {
   editorCode: ''
 };
 
+/**
+ * Create the main application window and menu.
+ */
 function createWindow() {
   const assetsDir = path.join(__dirname, '../../assets');
   let iconPath = path.join(assetsDir, 'wave-square-solid.svg');
@@ -35,17 +50,94 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true, // Enhances isolation by running renderer in OS sandbox
+      disableBlinkFeatures: 'Auxclick', // Prevent middle-click vulnerabilities
       preload: path.join(__dirname, 'preload.js')
     },
     icon: iconPath
   });
 
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  mainWindow.once('ready-to-show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
 
-  // Native application menu (File, Edit, Sketch, Tools, Help) — not next to board/port
+  // SECURITY: Prevent navigation to external websites within the app
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    const parsedUrl = new URL(navigationUrl);
+    // Only allow local file loads or the Vite Dev server
+    if (parsedUrl.protocol !== 'file:' && !navigationUrl.startsWith('http://localhost:5173')) {
+      event.preventDefault();
+      console.warn(`[Security] Blocked navigation attempt to: ${navigationUrl}`);
+    }
+  });
+
+  // SECURITY: Intercept all new window requests (e.g., target="_blank" links)
+  // and securely route them to the user's default OS browser.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+      shell.openExternal(url);
+    } else {
+      console.warn(`[Security] Blocked unsafe link open attempt to: ${url}`);
+    }
+    return { action: 'deny' }; // Never open a new Electron BrowserWindow
+  });
+
+  const isDev = process.argv.includes('--dev');
+  if (isDev) {
+    mainWindow.webContents.openDevTools();
+  }
+
+  // Load the renderer:
+  // - Dev mode (--dev): connect to Vite dev server for HMR
+  // - Production / start: load from Vite-built output (dist-renderer/)
+  const distRenderer = path.join(__dirname, '../../dist-renderer/index.html');
+
+  if (isDev) {
+    // In dev mode, Vite dev server must be running (npm run dev:renderer)
+    const VITE_DEV_URL = process.env.VITE_DEV_URL || 'http://localhost:5173';
+    mainWindow.loadURL(VITE_DEV_URL).catch(() => {
+      // Fallback: if Vite dev server isn't running, load the built version
+      if (fs.existsSync(distRenderer)) {
+        mainWindow.loadFile(distRenderer);
+      } else {
+        // Last resort: show an error instead of a white screen
+        mainWindow.loadURL(`data:text/html,<h2 style="font-family:sans-serif;padding:40px">Renderer not built.</h2><p style="font-family:sans-serif;padding:0 40px">Run <code>npm run build:renderer</code> first, or start the Vite dev server with <code>npm run dev:renderer</code>.</p>`);
+      }
+    });
+  } else if (fs.existsSync(distRenderer)) {
+    mainWindow.loadFile(distRenderer);
+  } else {
+    // Production but dist missing -- show actionable error
+    mainWindow.loadURL(`data:text/html,<h2 style="font-family:sans-serif;padding:40px">Renderer not built.</h2><p style="font-family:sans-serif;padding:0 40px">Run <code>npm run build:renderer</code> to build the UI.</p>`);
+  }
+
+  // --- Content Security Policy ---
+  // Block eval, inline scripts, and restrict origins to what the app actually needs.
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+            "font-src 'self' https://fonts.gstatic.com",
+            "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
+            "img-src 'self' data:",
+            "object-src 'none'",
+            "base-uri 'self'"
+          ].join('; ')
+        ]
+      }
+    });
+  });
+
   const sendMenuAction = (action) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('menu:action', action);
@@ -59,6 +151,8 @@ function createWindow() {
         { label: 'New Sketch', accelerator: 'CmdOrCtrl+N', click: () => sendMenuAction('file-new') },
         { label: 'Open...', accelerator: 'CmdOrCtrl+O', click: () => sendMenuAction('file-open') },
         { label: 'Open Folder...', click: () => sendMenuAction('file-open-folder') },
+        { label: 'Examples', click: () => sendMenuAction('file-examples') },
+        { label: 'Sketchbook', click: () => sendMenuAction('file-sketchbook') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => sendMenuAction('file-save') },
         { label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', click: () => sendMenuAction('file-save-as') },
@@ -105,6 +199,7 @@ function createWindow() {
         { label: 'Show Sketch Folder', accelerator: 'Alt+Ctrl+K', click: () => sendMenuAction('sketch-show-folder') },
         { type: 'separator' },
         { label: 'Include Library', click: () => sendMenuAction('sketch-include-library') },
+        { label: 'Add Tab', click: () => sendMenuAction('sketch-add-tab') },
         { label: 'Add File...', click: () => sendMenuAction('sketch-add-file') }
       ]
     },
@@ -141,51 +236,38 @@ function createWindow() {
     }
   ];
 
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools();
-  }
 }
 
 app.whenReady().then(() => {
-  // Initialize services
+  debug('app.whenReady', {});
   arduinoService = new ArduinoService();
   serialMonitor = new SerialMonitor();
   errorMemory = new ErrorMemory();
-  
-  // Initialize AI Agent
   apiKeyManager = new APIKeyManager();
   aiAgent = new AIAgent(arduinoService, serialMonitor, errorMemory);
   aiAgent.initializeProviders();
 
-  // Set up UI callbacks for the tool executor
   if (aiAgent.toolExecutor) {
     aiAgent.toolExecutor.setUICallbacks({
       getBaudRate: async () => uiState.currentBaudRate,
       setBaudRate: async (baudRate) => {
         uiState.currentBaudRate = baudRate;
-        // Notify renderer to update UI
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('ui:set-baud-rate', baudRate);
         }
       },
       getEditorCode: async () => {
-        // Request code from renderer
         if (mainWindow && !mainWindow.isDestroyed()) {
           return new Promise((resolve) => {
-            const handler = (event, code) => {
-              ipcMain.removeHandler('ui:editor-code-response');
-              resolve(code);
-            };
-            ipcMain.handleOnce('ui:editor-code-response', handler);
+            let done = false;
+            const finish = (code) => { if (!done) { done = true; resolve(code ?? ''); } };
+            // Use ipcMain.once (event listener) instead of handleOnce (handler)
+            // to avoid deadlock when multiple AI requests run concurrently.
+            ipcMain.once('ui:editor-code-response', (_event, code) => finish(code));
             mainWindow.webContents.send('ui:get-editor-code');
-            
-            // Timeout fallback
-            setTimeout(() => {
-              resolve(uiState.editorCode || '');
-            }, 1000);
+            setTimeout(() => finish(uiState.editorCode), 1000);
           });
         }
         return uiState.editorCode || '';
@@ -197,503 +279,184 @@ app.whenReady().then(() => {
         }
       },
       getCurrentSketchPath: async () => uiState.currentSketchPath,
-      saveSketch: async (path) => {
-        const filePath = path || uiState.currentSketchPath;
-        if (filePath && uiState.editorCode) {
-          const fs = require('fs').promises;
-          await fs.writeFile(filePath, uiState.editorCode, 'utf8');
+      saveSketch: async (filePath) => {
+        const p = filePath || uiState.currentSketchPath;
+        if (p && uiState.editorCode) {
+          await fsp.writeFile(p, uiState.editorCode, 'utf8');
         }
       },
       getSelectedBoard: async () => uiState.selectedBoard,
-      getSelectedPort: async () => uiState.selectedPort
+      getSelectedPort: async () => uiState.selectedPort,
+      setPlayground: async (content, append) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('playground:update', content, append);
+        }
+      }
     });
   }
 
-  // Set up serial monitor event listeners after initialization
   serialMonitor.on('data', (data) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('serial:data', data);
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:data', data);
   });
-
   serialMonitor.on('error', (error) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('serial:error', error.message);
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:error', error?.message ?? '');
   });
-
   serialMonitor.on('connected', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('serial:connected');
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:connected');
   });
-
   serialMonitor.on('disconnected', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('serial:disconnected');
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:disconnected');
+  });
+  serialMonitor.on('reconnecting', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:reconnecting', info);
+  });
+  serialMonitor.on('reconnected', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:reconnected', info);
+  });
+  serialMonitor.on('reconnect-failed', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('serial:reconnect-failed', info);
   });
 
   createWindow();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+  // Set up notification manager
+  notifications.setMainWindow(mainWindow);
+
+  // Auto-updater (check for updates 5s after launch, then every 4 hours)
+  let updaterService = null;
+  try {
+    const AutoUpdaterService = require('./services/autoUpdater');
+    updaterService = new AutoUpdaterService(mainWindow);
+    setTimeout(() => updaterService.checkForUpdates(), 5000);
+    setInterval(() => updaterService.checkForUpdates(), 4 * 60 * 60 * 1000);
+
+    ipcMain.handle('updater:check', async () => updaterService.checkForUpdates());
+    ipcMain.handle('updater:download', async () => updaterService.downloadUpdate());
+    ipcMain.handle('updater:install', () => updaterService.quitAndInstall());
+  } catch (err) {
+    // Auto-updater may not work in dev mode — register safe no-op handlers
+    // so the renderer doesn't crash with "No handler registered" errors.
+    console.warn('Auto-updater not available:', err.message);
+    ipcMain.handle('updater:check', async () => ({ available: false }));
+    ipcMain.handle('updater:download', async () => ({ success: false, error: 'Updater not available' }));
+    ipcMain.handle('updater:install', () => ({ success: false, error: 'Updater not available' }));
+  }
+
+  // Terminal service
+  terminalService = new TerminalService();
+  terminalService.on('data', ({ id, data }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal:data', id, data);
     }
+  });
+  terminalService.on('exit', ({ id, exitCode }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal:exit', id, exitCode);
+    }
+  });
+
+  // Terminal IPC handlers
+  ipcMain.handle('terminal:available', () => terminalService.isAvailable());
+  ipcMain.handle('terminal:create', (_event, options) => terminalService.create(options));
+  ipcMain.handle('terminal:write', (_event, id, data) => { terminalService.write(id, data); });
+  ipcMain.handle('terminal:resize', (_event, id, cols, rows) => { terminalService.resize(id, cols, rows); });
+  ipcMain.handle('terminal:kill', (_event, id) => { terminalService.kill(id); });
+  ipcMain.handle('terminal:list', () => terminalService.list());
+
+  // Plugin system — use Electron userData for portable installs (dev and packaged)
+  const appDataPath = app.getPath('userData');
+  const pluginManager = new PluginManager(appDataPath);
+  pluginManager.initialize().catch(err => console.warn('Plugin init:', err.message));
+
+  // Collaboration service
+  const collaboration = new CollaborationService();
+  collaboration.on('peer-joined', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('collab:peer-joined', info);
+  });
+  collaboration.on('peer-left', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('collab:peer-left', info);
+  });
+  collaboration.on('awareness-update', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('collab:awareness', info);
+  });
+
+  // Collaboration IPC — wrapped with try/catch because y-webrtc requires
+  // browser WebRTC APIs that don't exist in the main process. Each handler
+  // returns a safe error instead of crashing.
+  const collabNotReady = { success: false, error: 'Collaboration not yet supported in this version' };
+  ipcMain.handle('collab:create-room', async (_event, content, userName) => {
+    try { return await collaboration.createRoom(content, userName); }
+    catch (e) { return { ...collabNotReady, detail: e.message }; }
+  });
+  ipcMain.handle('collab:join-room', async (_event, roomId, userName) => {
+    try { return await collaboration.joinRoom(roomId, userName); }
+    catch (e) { return { ...collabNotReady, detail: e.message }; }
+  });
+  ipcMain.handle('collab:leave-room', async () => {
+    try { return await collaboration.leaveRoom(); }
+    catch (_) { return collabNotReady; }
+  });
+  ipcMain.handle('collab:apply-change', (_event, index, deleteCount, insertText) => {
+    try { collaboration.applyLocalChange(index, deleteCount, insertText); }
+    catch (_) { /* silent */ }
+  });
+  ipcMain.handle('collab:get-text', () => {
+    try { return collaboration.getText(); } catch (_) { return ''; }
+  });
+  ipcMain.handle('collab:get-peers', () => {
+    try { return collaboration.getPeers(); } catch (_) { return []; }
+  });
+  ipcMain.handle('collab:get-status', () => {
+    try { return collaboration.getStatus(); }
+    catch (_) { return { connected: false, roomId: null, peerCount: 0 }; }
+  });
+  ipcMain.handle('collab:update-cursor', (_event, pos, selStart, selEnd) => {
+    try { collaboration.updateCursor(pos, selStart, selEnd); }
+    catch (_) { /* silent */ }
+  });
+  ipcMain.handle('collab:observe', () => {
+    try {
+      collaboration.observeChanges((change) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('collab:remote-change', change);
+        }
+      });
+    } catch (_) { /* silent */ }
+  });
+
+  ipcMain.handle('plugins:list', () => pluginManager.listPlugins());
+  ipcMain.handle('plugins:commands', () => pluginManager.getRegisteredCommands());
+  ipcMain.handle('plugins:execute-command', (_event, cmdId, ...args) => pluginManager.executeCommand(cmdId, ...args));
+  ipcMain.handle('plugins:boards', () => pluginManager.getContributedBoards());
+
+  const ctx = {
+    mainWindow,
+    arduinoService,
+    serialMonitor,
+    errorMemory,
+    aiAgent,
+    apiKeyManager,
+    uiState,
+    fsp,
+    path,
+    dialog,
+    shell,
+    app
+  };
+  registerAllIpc(ipcMain, ctx);
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
 
-// UI State Update IPC Handlers
-ipcMain.on('ui:update-state', (event, key, value) => {
-  if (key in uiState) {
-    uiState[key] = value;
-  }
-});
-
-ipcMain.on('ui:update-editor-code', (event, code) => {
-  uiState.editorCode = code;
-});
-
-ipcMain.on('ui:update-sketch-path', (event, path) => {
-  uiState.currentSketchPath = path;
-});
-
-ipcMain.on('ui:update-baud-rate', (event, baudRate) => {
-  uiState.currentBaudRate = baudRate;
-});
-
-ipcMain.on('ui:update-board', (event, board) => {
-  uiState.selectedBoard = board;
-});
-
-ipcMain.on('ui:update-port', (event, port) => {
-  uiState.selectedPort = port;
-});
-
-ipcMain.on('app:quit', () => {
-  app.quit();
-});
-
-ipcMain.handle('shell:open-external', async (event, url) => {
-  if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
-    await shell.openExternal(url);
-    return { success: true };
-  }
-  return { success: false };
-});
-
-// Arduino CLI IPC Handlers
-ipcMain.handle('arduino:compile', async (event, sketchPath, boardFQBN) => {
-  try {
-    const result = await arduinoService.compile(sketchPath, boardFQBN);
-    return { success: true, data: result };
-  } catch (error) {
-    const analyzedError = await errorMemory.analyzeError(error);
-    return { success: false, error: error.message, analyzedError };
-  }
-});
-
-ipcMain.handle('arduino:upload', async (event, sketchPath, boardFQBN, port) => {
-  try {
-    const result = await arduinoService.upload(sketchPath, boardFQBN, port);
-    return { success: true, data: result };
-  } catch (error) {
-    const analyzedError = await errorMemory.analyzeError(error);
-    return { success: false, error: error.message, analyzedError };
-  }
-});
-
-ipcMain.handle('arduino:list-boards', async () => {
-  try {
-    const boards = await arduinoService.listBoards();
-    return { success: true, data: boards };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('arduino:list-ports', async () => {
-  try {
-    const ports = await arduinoService.listPorts();
-    return { success: true, data: ports };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('arduino:check-cli', async () => {
-  try {
-    const installed = await arduinoService.checkCLI();
-    return { success: true, installed };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Serial Monitor IPC Handlers
-ipcMain.handle('serial:connect', async (event, port, baudRate) => {
-  try {
-    await serialMonitor.connect(port, baudRate);
-    uiState.currentBaudRate = baudRate;
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('serial:disconnect', async () => {
-  try {
-    await serialMonitor.disconnect();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('serial:send', async (event, data) => {
-  try {
-    await serialMonitor.send(data);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('serial:list-ports', async () => {
-  try {
-    const ports = await serialMonitor.listPorts();
-    return { success: true, data: ports };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// File Dialog IPC Handlers
-ipcMain.handle('dialog:open-file', async () => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Select Arduino Sketch',
-      filters: [
-        { name: 'Arduino Sketches', extensions: ['ino'] },
-        { name: 'All Files', extensions: ['*'] }
-      ],
-      properties: ['openFile']
-    });
-    
-    if (result.canceled) {
-      return { success: false, canceled: true };
-    }
-    
-    return { success: true, filePath: result.filePaths[0] };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('dialog:open-folder', async () => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Open Folder (Sketchbook or Project)',
-      properties: ['openDirectory']
-    });
-    
-    if (result.canceled) {
-      return { success: false, canceled: true };
-    }
-    
-    return { success: true, folderPath: result.filePaths[0] };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// File Read/Write IPC Handlers (use fsp for promises to avoid conflict with top-level fs)
-const fsp = require('fs').promises;
-
-// Folder / File tree
-ipcMain.handle('folder:list', async (event, dirPath) => {
-  try {
-    if (!dirPath || typeof dirPath !== 'string') {
-      return { success: false, error: 'Folder path is required' };
-    }
-    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
-    const list = entries
-      .filter(e => !e.name.startsWith('.'))
-      .map(e => ({
-        name: e.name,
-        path: path.join(dirPath, e.name),
-        isDirectory: e.isDirectory()
-      }))
-      .sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-      });
-    return { success: true, entries: list };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Library IPC Handlers
-ipcMain.handle('lib:search', async (event, query) => {
-  try {
-    const data = await arduinoService.libSearch(query);
-    return { success: true, data };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('lib:install', async (event, libSpec) => {
-  try {
-    await arduinoService.libInstall(libSpec);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('lib:list', async () => {
-  try {
-    const data = await arduinoService.libList();
-    return { success: true, data };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('lib:update-index', async () => {
-  try {
-    await arduinoService.libUpdateIndex();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('lib:uninstall', async (event, libName) => {
-  try {
-    await arduinoService.libUninstall(libName);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:read', async (event, filePath) => {
-  try {
-    const content = await fsp.readFile(filePath, 'utf8');
-    return { success: true, content };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:save', async (event, filePath, content) => {
-  try {
-    await fsp.writeFile(filePath, content, 'utf8');
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Error Memory IPC Handlers
-ipcMain.handle('errors:get-history', async () => {
-  try {
-    const history = await errorMemory.getHistory();
-    return { success: true, data: history };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('errors:add-fix', async (event, errorId, fix) => {
-  try {
-    await errorMemory.addFix(errorId, fix);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// AI Agent IPC Handlers
-ipcMain.handle('ai:set-provider', async (event, providerName, apiKey, model) => {
-  try {
-    // If API key provided, save it first
-    if (apiKey && apiKey.trim().length > 0) {
-      try {
-        apiKeyManager.setAPIKey(providerName, apiKey);
-      } catch (keyError) {
-        return { success: false, error: `Failed to save API key: ${keyError.message}` };
-      }
-    }
-    
-    // Get the API key (either from parameter or stored)
-    const key = apiKey || apiKeyManager.getAPIKey(providerName);
-    
-    if (!key || key.trim().length === 0) {
-      return { success: false, error: 'API key not found. Please provide an API key.' };
-    }
-    
-    // Set the provider with model
-    aiAgent.setProvider(providerName, key, model);
-    return { success: true, provider: providerName, model: model || 'default' };
-  } catch (error) {
-    console.error('Error setting AI provider:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:process-query', async (event, query, context, mode) => {
-  try {
-    const enrichedContext = {
-      ...context,
-      currentBaudRate: uiState.currentBaudRate,
-      currentSketchPath: uiState.currentSketchPath,
-      selectedBoard: uiState.selectedBoard,
-      selectedPort: uiState.selectedPort,
-      hasFileOpen: context.hasFileOpen || false
-    };
-    const effectiveMode = mode === 'ask' || mode === 'debug' ? mode : 'agent';
-    const result = await aiAgent.processQuery(query, enrichedContext, effectiveMode);
-    return { success: true, data: result };
-  } catch (error) {
-    console.error('AI process query error:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:analyze-error', async (event, errorMessage, context) => {
-  try {
-    const result = await aiAgent.analyzeError(errorMessage, context);
-    return { success: true, data: result };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:analyze-serial', async (event, serialOutput, lines) => {
-  try {
-    const result = await aiAgent.analyzeSerialOutput(serialOutput, lines);
-    return { success: true, data: result };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:get-providers', async () => {
-  try {
-    const providers = aiAgent.getAvailableProviders();
-    return { success: true, data: providers };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:get-models', async (event, provider) => {
-  try {
-    const models = aiAgent.getAvailableModels(provider);
-    return { success: true, data: models };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:get-unified-models', async () => {
-  try {
-    const list = aiAgent.getUnifiedModelList();
-    return { success: true, data: list };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:set-model', async (event, modelId) => {
-  try {
-    const AIAgentClass = require('./services/ai/agent');
-    const providerName = AIAgentClass.getProviderFromModel(modelId);
-    if (!providerName) {
-      return { success: false, error: 'Unknown model' };
-    }
-    const key = apiKeyManager.getAPIKey(providerName);
-    if (!key || key.trim().length === 0) {
-      return { success: false, error: 'API key required', needsKey: true, provider: providerName };
-    }
-    aiAgent.setProvider(providerName, key, modelId);
-    return { success: true, provider: providerName, model: modelId };
-  } catch (error) {
-    console.error('AI set model error:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('ai:get-memory-stats', async () => {
-  try {
-    const stats = aiAgent.memory.getStats();
-    return { success: true, data: stats };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// AI Tool Execution Handler - for direct tool calls from UI
-ipcMain.handle('ai:execute-tool', async (event, toolName, args) => {
-  try {
-    if (!aiAgent.toolExecutor) {
-      return { success: false, error: 'Tool executor not initialized' };
-    }
-    
-    const result = await aiAgent.toolExecutor.execute({
-      name: toolName,
-      arguments: args
-    });
-    
-    return { success: true, data: result };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// API Key Management IPC Handlers
-ipcMain.handle('api-keys:set', async (event, provider, apiKey) => {
-  try {
-    apiKeyManager.setAPIKey(provider, apiKey);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('api-keys:get', async (event, provider) => {
-  try {
-    const config = apiKeyManager.getProviderConfig(provider);
-    return { success: true, data: config };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('api-keys:has', async (event, provider) => {
-  try {
-    const hasKey = apiKeyManager.hasAPIKey(provider);
-    return { success: true, hasKey };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('api-keys:remove', async (event, provider) => {
-  try {
-    apiKeyManager.removeAPIKey(provider);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
+app.on('before-quit', () => {
+  // Clean up terminal processes
+  if (terminalService) {
+    try { terminalService.killAll(); } catch (_) { /* ignore */ }
   }
 });

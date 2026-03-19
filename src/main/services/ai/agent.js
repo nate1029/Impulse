@@ -36,8 +36,9 @@ class AIAgent {
       ...config
     };
     
-    // Conversation history
+    // Conversation history with sliding window to prevent unbounded growth
     this.conversationHistory = [];
+    this.maxHistoryMessages = 40; // ~20 user + 20 assistant turns
   }
 
   /**
@@ -190,6 +191,9 @@ class AIAgent {
       content: userContent
     });
 
+    // Trim history to sliding window to prevent unbounded token growth
+    this._trimHistory();
+
     const messages = [
       {
         role: 'system',
@@ -313,7 +317,7 @@ class AIAgent {
     }
 
     // Use AI to analyze
-    const query = `Analyze this Arduino error and suggest fixes: ${errorMessage}\n\nContext: ${JSON.stringify(context, null, 2)}`;
+    let query = `Analyze this Arduino error and suggest fixes: ${errorMessage}\n\nContext: ${JSON.stringify(context, null, 2)}`;
     
     if (memoryResults.matches && memoryResults.matches.length > 0) {
       query += `\n\nSimilar past errors found: ${JSON.stringify(memoryResults.matches, null, 2)}`;
@@ -332,7 +336,7 @@ class AIAgent {
   /**
    * Analyze serial output
    */
-  async analyzeSerialOutput(serialOutput, lines = 50) {
+  async analyzeSerialOutput(serialOutput, _lines = 50) {
     if (!this.currentProvider) {
       return {
         source: 'local',
@@ -357,6 +361,29 @@ class AIAgent {
    */
   getHistory() {
     return this.conversationHistory;
+  }
+
+  /**
+   * Trim conversation history to stay within the sliding window.
+   * Preserves the most recent messages and never cuts in the middle
+   * of a tool-call/tool-result pair.
+   */
+  _trimHistory() {
+    if (this.conversationHistory.length <= this.maxHistoryMessages) return;
+
+    // Keep the most recent messages within budget
+    const excess = this.conversationHistory.length - this.maxHistoryMessages;
+    // Don't cut in the middle of a tool exchange — find safe cut point
+    let cutAt = excess;
+    while (cutAt < this.conversationHistory.length) {
+      const msg = this.conversationHistory[cutAt];
+      // Safe to cut before a user message (not a tool result)
+      if (msg.role === 'user' && !msg.tool_call_id) break;
+      cutAt++;
+    }
+    if (cutAt > 0 && cutAt < this.conversationHistory.length) {
+      this.conversationHistory = this.conversationHistory.slice(cutAt);
+    }
   }
 
   /**

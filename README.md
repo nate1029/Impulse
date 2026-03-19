@@ -1,6 +1,6 @@
-# Arduino IDE Cursor
+# Impulse IDE
 
-An AI-powered desktop application that acts as a "Cursor for Arduino / IoT" - providing intelligent compilation, upload, serial monitoring, and error detection capabilities.
+An AI-powered desktop application for Arduino / IoT development — intelligent compilation, upload, serial monitoring, and error detection. (Also known as Arduino IDE Cursor.)
 
 ## Features
 
@@ -47,7 +47,7 @@ Build a Windows executable:
 npm run build:win
 ```
 
-The executable will be created in the `dist` folder.
+The executable will be created in the `dist` folder. The packaged app has **no CDN dependency**: CodeMirror and fonts are bundled; the app runs offline. For code signing (to avoid Windows SmartScreen warnings) and clean-machine testing, see [docs/BUILD_AND_SIGN.md](docs/BUILD_AND_SIGN.md). Release and changelog process: [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Usage
 
@@ -85,14 +85,61 @@ The executable will be created in the `dist` folder.
 - Suggested fixes are displayed with confidence scores
 - Error history is maintained and can be viewed in the "Error History" panel
 
+## Usage Examples
+
+### Opening a sketch from the renderer (preload API)
+The renderer uses `window.electronAPI` (exposed via preload). Example: open a file and read it.
+```javascript
+const result = await window.electronAPI.dialog.openFile();
+if (result.success && result.filePath) {
+  const fileResult = await window.electronAPI.file.read(result.filePath);
+  if (fileResult.success) console.log(fileResult.content);
+}
+```
+
+### Compiling and uploading
+```javascript
+const boardFQBN = 'arduino:avr:uno';
+const port = 'COM3';
+const compileResult = await window.electronAPI.arduino.compile(sketchPath, boardFQBN);
+if (compileResult.success) {
+  const uploadResult = await window.electronAPI.arduino.upload(sketchPath, boardFQBN, port);
+}
+```
+
+### AI assistant (after setting a model and API key)
+```javascript
+const result = await window.electronAPI.ai.processQuery('Why does my LED not blink?', { code: editorCode, hasFileOpen: true }, 'agent');
+if (result.success && result.data?.response) console.log(result.data.response);
+```
+
+## Debug logging
+
+To enable debug logs (function entry/exit and timing for IPC handlers), set the environment variable before starting the app:
+- **Windows (PowerShell):** `$env:IMPULSE_IDE_DEBUG="1"; npm run dev`
+- **Windows (CMD):** `set IMPULSE_IDE_DEBUG=1 && npm run dev`
+- **macOS/Linux:** `IMPULSE_IDE_DEBUG=1 npm run dev`
+
+Logs are written to the terminal where you started the app.
+
+## Testing and lint
+
+```bash
+npm run test   # Run Jest tests (IPC validation schemas)
+npm run lint   # Run ESLint on src/main
+```
+
 ## Architecture
 
 ### Main Process (`src/main/`)
-- `main.js` - Electron main process, handles IPC communication
-- `preload.js` - Secure bridge between main and renderer processes
+- `main.js` - Electron main process; creates window and registers IPC
+- `preload.js` - Secure bridge between main and renderer (exposes `electronAPI`)
+- `ipc/` - IPC handlers by feature (shell, UI, arduino, serial, dialog, file, lib, errors, AI, API keys); input validated with Zod
+- `utils/logger.js` - Debug logging (behind `IMPULSE_IDE_DEBUG`)
 - `services/arduinoService.js` - Arduino CLI integration
 - `services/serialMonitor.js` - Serial port communication
 - `services/errorMemory.js` - Error detection and memory system
+- `services/ai/` - AI agent, providers (OpenAI, Gemini, Claude), tools, memory
 
 ### Renderer Process (`src/renderer/`)
 - `index.html` - Application UI structure
@@ -119,6 +166,23 @@ The application uses Arduino CLI (not the Arduino IDE executable) to:
 - Matches new errors with past errors
 - Suggests fixes based on historical data
 - Learns from user-provided fixes
+
+## Dependencies (package.json)
+
+| Package | Purpose | Note |
+|--------|---------|------|
+| `zod` | Runtime input validation for IPC | Used in `src/main/ipc/schemas.js`; safe defaults on invalid input |
+| `electron`, `electron-builder` | App and build | Required |
+| `@anthropic-ai/sdk`, `@google/generative-ai`, `openai` | AI providers | Used by AI agent |
+| `serialport`, `@serialport/parser-readline` | Serial monitor | Required for serial I/O |
+| `electron-store` | Settings storage | Used for preferences |
+| `chokidar` | File watching | Used for project/file tree |
+| `sql.js` | SQLite in-memory | Used by `services/ai/memory/aiMemory.js` (optional AI memory backend) |
+| `node-pty` | Terminal emulation | Reserved for future features (e.g. integrated terminal); not used by current UI. Can be removed if you do not plan to add a terminal. |
+
+**Suggestions:**  
+- **node-pty**: Optional. Remove from `dependencies` if you do not need an integrated terminal to reduce install size and native rebuilds.  
+- Run `npm audit` and consider `npm audit fix` for reported vulnerabilities (avoid `--force` unless you accept breaking changes).
 
 ## Configuration
 

@@ -2029,6 +2029,32 @@ body::after {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
+}
+
+.editor-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.virtual-lab-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.virtual-lab-view #playgroundOutput {
+    display: flex !important;
+    flex-direction: column;
+    flex: 1;
+    padding: 0;
+    overflow: hidden;
+    min-height: 0;
 }
 
 /* Tab Bar */
@@ -4788,4 +4814,692 @@ button svg,
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+}
+
+/* ============================================
+   Virtual Lab (Playground) — Full Simulator
+   ============================================ */
+
+/* Override output-content for playground to fill with flex */
+#playgroundOutput.output-content.active {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+}
+
+.vlab-root {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
+    font-family: var(--font-ui);
+}
+
+/* ── Toolbar ── */
+.vlab-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    min-height: 42px;
+}
+
+.vlab-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.vlab-toolbar-center {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vlab-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.vlab-title {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.vlab-board-badge {
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+}
+
+.vlab-status-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.vlab-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.vlab-status-dot.loading { background: var(--accent-yellow); animation: vlab-pulse 1.2s infinite; }
+.vlab-status-dot.ready   { background: var(--accent-green); }
+.vlab-status-dot.running { background: var(--accent-green); animation: vlab-pulse 0.8s infinite; }
+
+@keyframes vlab-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.vlab-status-text {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+/* Buttons */
+.vlab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+    font-family: var(--font-ui);
+}
+
+.vlab-btn-primary {
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border-color: var(--accent);
+}
+.vlab-btn-primary:hover { opacity: 0.85; }
+.vlab-btn-primary.running { background: #e74c3c; border-color: #e74c3c; }
+
+.vlab-btn-secondary {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--border);
+}
+.vlab-btn-secondary:hover { background: var(--bg-hover); }
+
+.vlab-btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    border-color: transparent;
+}
+.vlab-btn-ghost:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+.vlab-btn-ai {
+    background: linear-gradient(135deg, #6c3fc5, #3a8fd6);
+    color: #fff;
+    border-color: transparent;
+    font-weight: 600;
+}
+.vlab-btn-ai:hover { opacity: 0.88; }
+.vlab-btn-ai:disabled { opacity: 0.55; cursor: default; }
+
+.vlab-board-select {
+    font-size: 11px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    cursor: pointer;
+    max-width: 160px;
+}
+
+/* ── Body layout ── */
+.vlab-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+/* ── Sidebar (component list) ── */
+.vlab-sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.vlab-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.vlab-comp-count {
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border-radius: 99px;
+    padding: 0 6px;
+    font-size: 10px;
+    font-weight: 700;
+    min-width: 18px;
+    text-align: center;
+    line-height: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vlab-component-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.vlab-empty-list {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 20px 12px;
+    line-height: 1.6;
+}
+
+.vlab-comp-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+    overflow: hidden;
+}
+
+.vlab-comp-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+}
+
+.vlab-comp-card-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.vlab-comp-card-name {
+    flex: 1;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.vlab-comp-remove {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    border-radius: 3px;
+    transition: all var(--transition-fast);
+}
+.vlab-comp-remove:hover { color: var(--accent-red); background: rgba(255,82,82,0.08); }
+
+.vlab-pin-config {
+    padding: 6px 8px;
+}
+
+.vlab-pin-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.vlab-pin-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    width: 72px;
+    flex-shrink: 0;
+}
+
+.vlab-pin-select {
+    flex: 1;
+    font-size: 10px;
+    padding: 2px 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    cursor: pointer;
+}
+
+/* ── Simulator iframe area ── */
+.vlab-sim-area {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #0d1117;
+    display: flex;
+    flex-direction: column;
+}
+
+.vlab-3d-canvas {
+    display: block;
+    outline: none;
+    width: 100%;
+    height: 100%;
+}
+
+.vlab-3d-hint {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: rgba(255,255,255,0.3);
+    pointer-events: none;
+    white-space: nowrap;
+    letter-spacing: 0.03em;
+}
+
+.vlab-iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+}
+
+.vlab-sim-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    z-index: 10;
+}
+
+.vlab-sim-loading-inner {
+    text-align: center;
+}
+
+.vlab-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: vlab-spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+}
+
+@keyframes vlab-spin {
+    to { transform: rotate(360deg); }
+}
+
+.vlab-sim-loading-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.vlab-sim-loading-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* ── Component drawer (slide-in) ── */
+.vlab-drawer-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.3);
+    z-index: 50;
+    display: none;
+    backdrop-filter: blur(2px);
+}
+
+.vlab-drawer-overlay.active {
+    display: block;
+}
+
+.vlab-component-drawer {
+    position: absolute;
+    top: 0;
+    left: -280px;
+    width: 280px;
+    height: 100%;
+    background: var(--bg-primary);
+    border-right: 1px solid var(--border);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    transition: left var(--transition-normal);
+    box-shadow: 4px 0 20px rgba(0,0,0,0.2);
+}
+
+.vlab-component-drawer.open {
+    left: 0;
+}
+
+.vlab-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+
+.vlab-drawer-close {
+    background: transparent;
+    border: none;
+    font-size: 18px;
+    color: var(--text-muted);
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 4px;
+}
+.vlab-drawer-close:hover { color: var(--text-primary); }
+
+.vlab-drawer-search {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.vlab-drawer-search-input {
+    width: 100%;
+    padding: 5px 8px;
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    outline: none;
+}
+.vlab-drawer-search-input:focus { border-color: var(--accent); }
+
+.vlab-drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+}
+
+.vlab-drawer-section-header {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    padding: 8px 0 4px;
+}
+
+.vlab-drawer-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.vlab-comp-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    font-family: var(--font-ui);
+    text-align: center;
+}
+
+.vlab-comp-tile:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.vlab-comp-icon {
+    font-size: 22px;
+    line-height: 1;
+}
+
+.vlab-comp-name {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.3;
+}
+
+/* ── Toast notification ── */
+.vlab-toast {
+    position: fixed;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%) translateY(8px);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    padding: 6px 16px;
+    border-radius: 99px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9999;
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.vlab-toast.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+/* ── Welcome panel ── */
+.vlab-welcome {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    z-index: 5;
+    overflow-y: auto;
+    padding: 24px;
+}
+
+.vlab-welcome-inner {
+    max-width: 440px;
+    width: 100%;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+.vlab-welcome-icon {
+    color: var(--text-muted);
+    opacity: 0.6;
+    margin-bottom: 4px;
+}
+
+.vlab-welcome-chip-name {
+    font-size: 13px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+}
+
+.vlab-welcome-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+}
+
+.vlab-welcome-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    max-width: 360px;
+}
+
+.vlab-welcome-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    margin: 4px 0;
+}
+
+.vlab-welcome-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.vlab-step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    min-width: 20px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    margin-top: 1px;
+}
+
+.vlab-welcome-step code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+}
+
+.vlab-welcome-btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 20px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-family: var(--font-ui);
+    transition: opacity var(--transition-fast);
+    width: 100%;
+    justify-content: center;
+}
+.vlab-welcome-btn-primary:hover { opacity: 0.85; }
+
+.vlab-embed-row {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+}
+
+.vlab-embed-input {
+    flex: 1;
+    font-size: 11px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    outline: none;
+    min-width: 0;
+}
+.vlab-embed-input:focus { border-color: var(--accent); }
+.vlab-embed-input::placeholder { color: var(--text-muted); }
+
+/* ── Dark mode adjustments ── */
+[data-theme="dark"] .vlab-sim-area {
+    background: #0d1117;
+}
+
+[data-theme="dark"] .vlab-drawer-overlay {
+    background: rgba(0,0,0,0.5);
+}
+
+[data-theme="dark"] .vlab-welcome {
+    background: #0d1117;
 }

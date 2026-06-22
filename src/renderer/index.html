@@ -130,6 +130,13 @@
                             <path d="m21 21-4.35-4.35" />
                         </svg>
                     </button>
+                    <button class="activity-icon" id="virtualLabActivityBtn" title="Virtual Lab — 3D Simulator">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="7" width="20" height="14" rx="2"/>
+                            <path d="M16 7V5a2 2 0 00-4 0v2M8 7V5a2 2 0 00-4 0v2"/>
+                            <circle cx="12" cy="14" r="3" fill="currentColor" stroke="none" opacity="0.6"/>
+                        </svg>
+                    </button>
                 </div>
                 <div class="activity-bar-bottom">
                     <button class="activity-icon activity-theme-toggle" id="themeToggleBtn"
@@ -427,6 +434,16 @@
 
                 <!-- Editor Container -->
                 <div class="editor-container">
+
+                    <!-- Virtual Lab Full View (shown when Virtual Lab activity icon is clicked) -->
+                    <div id="virtualLabView" class="virtual-lab-view" style="display:none;">
+                        <div id="playgroundOutput" class="output-content playground-content active">
+                            <!-- Virtual Lab is mounted here by playground.js -->
+                        </div>
+                    </div>
+
+                    <!-- Normal Editor View (hidden when Virtual Lab is active) -->
+                    <div id="editorView" class="editor-view">
                     <!-- Tab Bar (multiple file tabs) -->
                     <div class="tab-bar">
                         <div id="fileTabs" class="file-tabs">
@@ -479,23 +496,12 @@
                             <canvas id="plotterCanvas" class="plotter-canvas"></canvas>
                         </div>
                         <div id="problemsOutput" class="output-content"></div>
-                        <div id="playgroundOutput" class="output-content playground-content">
-                            <div class="playground-toolbar">
-                                <span class="playground-label">
-                                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
-                                    </svg>
-                                    Hardware Tasks
-                                </span>
-                                <button id="playgroundClearBtn" class="plotter-ctrl-btn" title="Clear playground">✕</button>
-                            </div>
-                            <div id="playgroundEntries" class="playground-entries"></div>
-                        </div>
                         <div class="serial-input-row" id="serialInputRow" style="display: none;">
                             <input type="text" id="serialInput" placeholder="Send to serial...">
                             <button id="sendSerial">Send</button>
                         </div>
                     </div>
+                    </div><!-- end #editorView -->
                 </div>
             </div>
         </div>

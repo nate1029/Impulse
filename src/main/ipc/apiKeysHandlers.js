@@ -62,6 +62,17 @@ function register(ipcMain, ctx) {
     }
   }));
 
+  ipcMain.handle('api-keys:get-raw', withDebugLog('api-keys:get-raw', async (event, provider) => {
+    const parsed = parseOrDefault(schemas.apiKeysProvider, { provider: provider ?? '' }, defaultFail);
+    if (!parsed.ok) return parsed.defaultResult;
+    try {
+      const key = apiKeyManager.getAPIKey(parsed.data.provider);
+      return { success: true, key: key || null };
+    } catch (error) {
+      return { success: false, error: error?.message ?? 'Get key failed', key: null };
+    }
+  }));
+
   ipcMain.handle('api-keys:remove', withDebugLog('api-keys:remove', async (event, provider) => {
     const parsed = parseOrDefault(schemas.apiKeysProvider, { provider: provider ?? '' }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;

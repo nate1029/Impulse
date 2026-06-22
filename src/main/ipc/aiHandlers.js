@@ -133,6 +133,42 @@ function register(ipcMain, ctx) {
     }
   }));
 
+  ipcMain.handle('ai:openai-chat', withDebugLog('ai:openai-chat', async (event, { messages, model = 'gpt-4o-mini', temperature = 0 }) => {
+    try {
+      const key = apiKeyManager.getAPIKey('openai');
+      if (!key) return { success: false, error: 'No OpenAI API key set — add it in Settings → API Keys' };
+
+      const https = require('https');
+      const body = JSON.stringify({ model, temperature, messages });
+
+      const text = await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: 'api.openai.com',
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`,
+            'Content-Length': Buffer.byteLength(body),
+          },
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => resolve(data));
+        });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+
+      const json = JSON.parse(text);
+      if (json.error) return { success: false, error: json.error.message };
+      return { success: true, content: json.choices?.[0]?.message?.content || '' };
+    } catch (error) {
+      return { success: false, error: error?.message ?? 'OpenAI request failed' };
+    }
+  }));
+
   ipcMain.handle('ai:execute-tool', withDebugLog('ai:execute-tool', async (event, toolName, args) => {
     const parsed = parseOrDefault(schemas.aiExecuteTool, { toolName: toolName ?? '', args: args ?? {} }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;

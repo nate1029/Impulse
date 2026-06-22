@@ -75,8 +75,6 @@ function createWindow() {
     }
   });
 
-  // SECURITY: Intercept all new window requests (e.g., target="_blank" links)
-  // and securely route them to the user's default OS browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     const parsedUrl = new URL(url);
     if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
@@ -85,6 +83,23 @@ function createWindow() {
       console.warn(`[Security] Blocked unsafe link open attempt to: ${url}`);
     }
     return { action: 'deny' }; // Never open a new Electron BrowserWindow
+  });
+
+  // Native context menu for cut/copy/paste in text fields and editors
+  mainWindow.webContents.on('context-menu', (event, params) => {
+    if (params.isEditable || params.selectionText) {
+      const menu = Menu.buildFromTemplate([
+        { role: 'undo', enabled: params.editFlags.canUndo },
+        { role: 'redo', enabled: params.editFlags.canRedo },
+        { type: 'separator' },
+        { role: 'cut', enabled: params.editFlags.canCut },
+        { role: 'copy', enabled: params.editFlags.canCopy },
+        { role: 'paste', enabled: params.editFlags.canPaste },
+        { type: 'separator' },
+        { role: 'selectAll', enabled: params.editFlags.canSelectAll }
+      ]);
+      menu.popup();
+    }
   });
 
   const isDev = process.argv.includes('--dev');
@@ -128,8 +143,9 @@ function createWindow() {
             "script-src 'self'",
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
             "font-src 'self' https://fonts.gstatic.com",
-            "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
-            "img-src 'self' data:",
+            "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com wss://wokwi.com https://wokwi.com",
+            "img-src 'self' data: https://wokwi.com https://*.wokwi.com",
+            "frame-src https://wokwi.com https://*.wokwi.com",
             "object-src 'none'",
             "base-uri 'self'"
           ].join('; ')
@@ -166,13 +182,13 @@ function createWindow() {
     {
       label: 'Edit',
       submenu: [
-        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => sendMenuAction('edit-undo') },
-        { label: 'Redo', accelerator: 'CmdOrCtrl+Y', click: () => sendMenuAction('edit-redo') },
+        { role: 'undo' },
+        { role: 'redo' },
         { type: 'separator' },
-        { label: 'Cut', accelerator: 'CmdOrCtrl+X', click: () => sendMenuAction('edit-cut') },
-        { label: 'Copy', accelerator: 'CmdOrCtrl+C', click: () => sendMenuAction('edit-copy') },
-        { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: () => sendMenuAction('edit-paste') },
-        { label: 'Select All', accelerator: 'CmdOrCtrl+A', click: () => sendMenuAction('edit-select-all') },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
         { type: 'separator' },
         { label: 'Go to Line...', accelerator: 'CmdOrCtrl+L', click: () => sendMenuAction('edit-goto-line') },
         { label: 'Comment/Uncomment', accelerator: 'CmdOrCtrl+/', click: () => sendMenuAction('edit-comment') },

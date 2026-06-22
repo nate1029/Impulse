@@ -111,7 +111,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getModels: (provider) => ipcRenderer.invoke('ai:get-models', provider),
     getUnifiedModels: () => ipcRenderer.invoke('ai:get-unified-models'),
     getMemoryStats: () => ipcRenderer.invoke('ai:get-memory-stats'),
-    executeTool: (toolName, args) => ipcRenderer.invoke('ai:execute-tool', toolName, args)
+    executeTool: (toolName, args) => ipcRenderer.invoke('ai:execute-tool', toolName, args),
+    openaiChat: (opts) => ipcRenderer.invoke('ai:openai-chat', opts)
   },
   
   // API Key Management methods
@@ -120,7 +121,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     get: (provider) => ipcRenderer.invoke('api-keys:get', provider),
     has: (provider) => ipcRenderer.invoke('api-keys:has', provider),
     remove: (provider) => ipcRenderer.invoke('api-keys:remove', provider),
-    list: () => ipcRenderer.invoke('api-keys:list')
+    list: () => ipcRenderer.invoke('api-keys:list'),
+    getRaw: (provider) => ipcRenderer.invoke('api-keys:get-raw', provider)
   },
   
   // Terminal integration

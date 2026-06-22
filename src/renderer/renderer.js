@@ -4,6 +4,7 @@
 // ============================================
 
 import { getCodeMirror } from './codemirror-ref.js';
+import { initPlayground } from './playground.js';
 
 // UI State — exposed on window so other modules (validation.js, etc.) can access it
 // without relying on bundler scope-hoisting accidents.
@@ -512,84 +513,57 @@ async function openFile() {
 // Playground Panel
 // ============================================
 function setupPlayground() {
-    const entriesEl = document.getElementById('playgroundEntries');
-    const clearBtn = document.getElementById('playgroundClearBtn');
+    initPlayground();
+    setupVirtualLabView();
+}
 
-    if (!entriesEl) return;
+function setupVirtualLabView() {
+    const btn = document.getElementById('virtualLabActivityBtn');
+    if (!btn) return;
 
-    // Show empty state initially
-    showPlaygroundEmpty();
+    btn.addEventListener('click', () => {
+        const isActive = btn.classList.contains('active');
+        if (isActive) {
+            // Deactivate — go back to editor
+            showEditorView();
+        } else {
+            showVirtualLabView();
+        }
+    });
+}
 
-    function showPlaygroundEmpty() {
-        entriesEl.innerHTML = '<div class="playground-empty">AI hardware tasks will appear here</div>';
-    }
+function showVirtualLabView() {
+    const labView    = document.getElementById('virtualLabView');
+    const editorView = document.getElementById('editorView');
+    const btn        = document.getElementById('virtualLabActivityBtn');
 
-    function addEntry(content) {
-        // Remove empty state if present
-        const emptyEl = entriesEl.querySelector('.playground-empty');
-        if (emptyEl) emptyEl.remove();
+    if (labView)    labView.style.display    = 'flex';
+    if (editorView) editorView.style.display = 'none';
+    if (btn)        btn.classList.add('active');
 
-        const entry = document.createElement('div');
-        entry.className = 'playground-entry';
+    // Deactivate other activity icons
+    document.querySelectorAll('.activity-icon[data-panel]').forEach(i => {
+        if (i !== btn) i.classList.remove('active');
+    });
 
-        const header = document.createElement('div');
-        header.className = 'playground-entry-header';
-        const now = new Date();
-        header.textContent = `Step ${entriesEl.querySelectorAll('.playground-entry').length + 1} — ${now.toLocaleTimeString()}`;
+    // After layout settles, resize the 3D renderer to fill the sim area
+    setTimeout(() => {
+        const simArea = document.querySelector('.vlab-sim-area');
+        if (!simArea || !window._vlabRenderer) return;
+        const w = simArea.clientWidth;
+        const h = simArea.clientHeight;
+        if (w > 10 && h > 10) window._vlabRenderer.resize(w, h);
+    }, 50);
+}
 
-        const body = document.createElement('div');
-        body.textContent = content;
+function showEditorView() {
+    const labView    = document.getElementById('virtualLabView');
+    const editorView = document.getElementById('editorView');
+    const btn        = document.getElementById('virtualLabActivityBtn');
 
-        entry.appendChild(header);
-        entry.appendChild(body);
-        entriesEl.appendChild(entry);
-
-        // Auto-scroll to bottom
-        entriesEl.scrollTop = entriesEl.scrollHeight;
-    }
-
-    function replaceAll(content) {
-        entriesEl.innerHTML = '';
-        addEntry(content);
-    }
-
-    function switchToPlaygroundTab() {
-        const tabs = document.querySelectorAll('.output-tab');
-        tabs.forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.output-content').forEach(c => c.classList.remove('active'));
-
-        const playgroundTab = document.querySelector('.output-tab[data-tab="playground"]');
-        const playgroundContent = document.getElementById('playgroundOutput');
-        if (playgroundTab) playgroundTab.classList.add('active');
-        if (playgroundContent) playgroundContent.classList.add('active');
-
-        // Hide serial input row
-        const serialInputRow = document.getElementById('serialInputRow');
-        if (serialInputRow) serialInputRow.style.display = 'none';
-
-        // Stop plotter rendering
-        if (typeof stopPlotterRendering === 'function') stopPlotterRendering();
-    }
-
-    // Listen for playground updates from the AI agent via IPC
-    if (window.electronAPI && window.electronAPI.ui && window.electronAPI.ui.onPlaygroundUpdate) {
-        window.electronAPI.ui.onPlaygroundUpdate((content, append) => {
-            if (append === false) {
-                replaceAll(content);
-            } else {
-                addEntry(content);
-            }
-            // Auto-switch to the Playground tab
-            switchToPlaygroundTab();
-        });
-    }
-
-    // Clear button
-    if (clearBtn) {
-        clearBtn.addEventListener('click', () => {
-            showPlaygroundEmpty();
-        });
-    }
+    if (labView)    labView.style.display    = 'none';
+    if (editorView) editorView.style.display = 'flex';
+    if (btn)        btn.classList.remove('active');
 }
 
 // Auto-save current file every 30 seconds
@@ -2098,6 +2072,14 @@ async function openFileFromTree(filePath) {
             showEditor();
             addOrFocusFile(filePath, fileResult.content, fileName);
             switchToTab(state.activeTabIndex);
+            // Force CodeMirror to re-render after container visibility change
+            setTimeout(() => {
+                if (state.editor) {
+                    state.editor.refresh();
+                    state.editor.setValue(fileResult.content);
+                    state.editor.refresh();
+                }
+            }, 50);
             state.context.activeFile = filePath;
             updateAIContext();
             logToConsole(`Opened: ${fileName}`, 'success');

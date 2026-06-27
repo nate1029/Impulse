@@ -313,12 +313,28 @@ export function parseArduinoCode(code) {
     } else if (fn === 'delay') {
       const ms = parseInt(args[0]);
       if (!isNaN(ms)) events.push({ type: 'delay', ms });
+    } else if (fn === 'delayMicroseconds') {
+      const us = parseInt(args[0]);
+      if (!isNaN(us)) events.push({ type: 'delay', ms: Math.max(1, Math.round(us / 1000)) });
     } else if (fn === 'tone') {
       const pin = resolvePin(args[0]);
       if (pin !== null) events.push({ type: 'tone', pin, freq: parseInt(args[1]) || 0 });
     } else if (fn === 'noTone') {
       const pin = resolvePin(args[0]);
       if (pin !== null) events.push({ type: 'noTone', pin });
+    } else if (fn === 'Serial.print' || fn === 'Serial.println') {
+      const raw = m[2].trim().replace(/^["']|["']$/g, '');
+      const nl  = fn === 'Serial.println';
+      events.push({ type: 'serial', text: raw + (nl ? '\n' : '') });
+    } else if (fn === 'Serial.begin') {
+      // no-op for simulation
+    } else if (fn.endsWith('.write') || fn.endsWith('.Write')) {
+      // Servo.write(angle) — treat as PWM approximation
+      const pin = resolvePin(fn.split('.')[0]);
+      const angle = parseInt(args[0]);
+      if (pin !== null && !isNaN(angle)) {
+        events.push({ type: 'analogWrite', pin, value: Math.round((angle / 180) * 255) });
+      }
     }
   }
 
@@ -334,15 +350,18 @@ function buildTimeline(events) {
     else if (ev.type === 'analogWrite')  { timeline.push({ t, pin: ev.pin, value: ev.value / 255, type: 'pwm' }); }
     else if (ev.type === 'tone')   { timeline.push({ t, pin: ev.pin, value: 1, type: 'digital' }); }
     else if (ev.type === 'noTone') { timeline.push({ t, pin: ev.pin, value: 0, type: 'digital' }); }
+    else if (ev.type === 'serial') { timeline.push({ t, type: 'serial', text: ev.text }); }
   });
   return { timeline, duration: t };
 }
 
 // ── Main 3D renderer class ────────────────────────────────────────────────────
 export class VirtualLabRenderer {
-  constructor(canvas, { onPinAssign } = {}) {
+  constructor(canvas, { onPinAssign, onComponentDelete, onComponentDisconnect } = {}) {
     this.canvas      = canvas;
-    this.onPinAssign = onPinAssign || null; // callback(uid, newPinName)
+    this.onPinAssign = onPinAssign || null;             // callback(uid, newPinName)
+    this.onComponentDelete = onComponentDelete || null; // callback(uid)
+    this.onComponentDisconnect = onComponentDisconnect || null; // callback(uid)
 
     this.animTimers  = [];
     this.running     = false;
@@ -357,8 +376,23 @@ export class VirtualLabRenderer {
     this._drag = null;       // { uid, group, startPos, planeY }
     this._snapTarget = null; // { pinName, snapMesh }
 
+    // Wire system — unified store for both auto-wires and manually drawn wires.
+    // Each wire: { id, fromPin, toUid, mesh, flowTex, flowMat, energized, length }
+    this.wires       = [];
+    this._wireDraw   = null; // active draw session: { fromPin, fromPos, toPoint, hoverUid, mesh }
+    this._wireIdSeq  = 0;
+    this._clock      = new THREE.Clock();
+    this._flowCanvas = this._makeFlowCanvas(); // shared canvas, one CanvasTexture per wire
+
+    // Serial monitor overlay
+    this._serialLines = [];
+    this._serialOverlay = this._createSerialOverlay();
+
     // Tooltip overlay
     this._tooltip = this._createTooltip();
+
+    // Right-click context menu overlay
+    this._ctxMenu = this._createContextMenu();
 
     this._initScene();
     this._initLights();
@@ -376,6 +410,90 @@ export class VirtualLabRenderer {
     `;
     document.body.appendChild(div);
     return div;
+  }
+
+  // ── Right-click context menu (per component) ─────────────────────────────────
+  _createContextMenu() {
+    const div = document.createElement('div');
+    div.style.cssText = `
+      position:fixed; display:none; z-index:10000; min-width:180px;
+      background:rgba(16,22,38,0.97); color:#e8f4ff; border:1px solid #3a8fd6;
+      border-radius:8px; padding:8px; font:12px/1.4 system-ui,monospace;
+      box-shadow:0 6px 24px rgba(0,0,0,0.5);
+    `;
+    document.body.appendChild(div);
+    return div;
+  }
+
+  _onContextMenu(e) {
+    e.preventDefault();
+    if (this._wireDraw) return;
+    const { x, y, cx, cy } = this._getNDC(e);
+    this._raycaster.setFromCamera(new THREE.Vector2(x, y), this.camera);
+
+    const compMeshes = [];
+    Object.entries(this.components).forEach(([uid, comp]) => {
+      comp.group.traverse(obj => {
+        if (obj.isMesh) { obj.userData.compUid = uid; compMeshes.push(obj); }
+      });
+    });
+    const hits = this._raycaster.intersectObjects(compMeshes, false);
+    if (!hits.length) { this._hideContextMenu(); return; }
+    this._showContextMenu(hits[0].object.userData.compUid, cx, cy);
+  }
+
+  _showContextMenu(uid, cx, cy) {
+    const comp = this.components[uid];
+    if (!comp) return;
+    const menu = this._ctxMenu;
+    menu.innerHTML = '';
+
+    const title = document.createElement('div');
+    title.textContent = comp.type.toUpperCase();
+    title.style.cssText = 'font-weight:700;margin-bottom:4px;color:#7fd0ff;';
+    menu.appendChild(title);
+
+    const pinRow = document.createElement('div');
+    pinRow.textContent = comp.pinName ? `Pin: ${comp.pinName}` : 'Pin: — not connected —';
+    pinRow.style.cssText = 'margin-bottom:8px;opacity:0.85;border-bottom:1px solid #24304a;padding-bottom:6px;';
+    menu.appendChild(pinRow);
+
+    const mkBtn = (label, color, handler) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = `
+        display:block;width:100%;text-align:left;margin:3px 0;padding:6px 8px;
+        background:transparent;border:1px solid ${color};border-radius:5px;
+        color:${color};cursor:pointer;font:inherit;`;
+      b.onmouseenter = () => { b.style.background = color; b.style.color = '#0d1117'; };
+      b.onmouseleave = () => { b.style.background = 'transparent'; b.style.color = color; };
+      b.onclick = (ev) => { ev.stopPropagation(); handler(); this._hideContextMenu(); };
+      menu.appendChild(b);
+      return b;
+    };
+
+    if (comp.pinName) {
+      mkBtn('🔌 Disconnect wire', '#ffaa33', () => {
+        comp.pinName = null;
+        this._removeWire(uid);
+        if (this.onComponentDisconnect) this.onComponentDisconnect(uid);
+        else if (this.onPinAssign) this.onPinAssign(uid, null);
+      });
+    }
+    mkBtn('🗑 Delete component', '#ff5566', () => {
+      this.removeComponent(uid);
+      if (this.onComponentDelete) this.onComponentDelete(uid);
+    });
+
+    menu.style.display = 'block';
+    // Keep within viewport
+    const vw = window.innerWidth, vh = window.innerHeight;
+    menu.style.left = Math.min(cx + 4, vw - 200) + 'px';
+    menu.style.top  = Math.min(cy + 4, vh - 140) + 'px';
+  }
+
+  _hideContextMenu() {
+    if (this._ctxMenu) this._ctxMenu.style.display = 'none';
   }
 
   _initScene() {
@@ -434,10 +552,15 @@ export class VirtualLabRenderer {
     el.addEventListener('mousemove', e => this._onMouseMove(e));
     el.addEventListener('mousedown', e => this._onMouseDown(e));
     el.addEventListener('mouseup',   e => this._onMouseUp(e));
+    el.addEventListener('dblclick',  e => this._onDoubleClick(e));
+    el.addEventListener('contextmenu', e => this._onContextMenu(e));
     el.addEventListener('mouseleave', () => {
       this._tooltip.style.display = 'none';
       if (this._drag) this._cancelDrag();
     });
+    // Escape cancels an in-progress wire draw
+    this._onKeyDown = (e) => { if (e.key === 'Escape' && this._wireDraw) this._cancelWireDraw(); };
+    window.addEventListener('keydown', this._onKeyDown);
   }
 
   _getNDC(e) {
@@ -452,6 +575,11 @@ export class VirtualLabRenderer {
   _onMouseMove(e) {
     const { x, y, cx, cy } = this._getNDC(e);
     this._mouse.set(x, y);
+
+    if (this._wireDraw) {
+      this._doWireDraw(x, y, cx, cy);
+      return;
+    }
 
     if (this._drag) {
       this._doDrag(x, y);
@@ -490,7 +618,24 @@ export class VirtualLabRenderer {
 
   _onMouseDown(e) {
     if (e.button !== 0) return;
+    this._hideContextMenu();
+
+    // If currently drawing a wire, a click finalizes (connect) or cancels it.
+    if (this._wireDraw) { this._finishWireDraw(); return; }
+
     const { x, y } = this._getNDC(e);
+
+    // Manual double-click detection — more reliable over the WebGL canvas than the
+    // synthesized dblclick event. Double-clicking on/near a pin summons a wire.
+    const now = performance.now();
+    if (this._lastDown && (now - this._lastDown.t) < 350 &&
+        Math.hypot(e.clientX - this._lastDown.cx, e.clientY - this._lastDown.cy) < 6) {
+      this._lastDown = null;
+      if (this._tryStartWireFromPin(x, y)) return;
+    } else {
+      this._lastDown = { t: now, cx: e.clientX, cy: e.clientY };
+    }
+
     this._raycaster.setFromCamera(new THREE.Vector2(x, y), this.camera);
 
     const compMeshes = [];
@@ -544,15 +689,26 @@ export class VirtualLabRenderer {
     const SNAP_RADIUS = 12; // mm — generous so it's easy to feel
     const willSnap = nearDist < SNAP_RADIUS;
 
-    if (willSnap && nearPin) {
-      // Preview-snap: show component hovering exactly over target pin
+    const comp = this.components[this._drag.uid];
+    const isConnected = comp && comp.pinName;
+
+    if (isConnected) {
+      // Already wired: dragging just repositions the component and the wire
+      // stretches to follow — it never snaps to another pin or breaks.
+      this._drag.group.position.set(point.x, this._drag.planeY, point.z);
+      this._updateWire(this._drag.uid);
+      this._updateSnapHighlight(null, null, def);
+      this._drag.snapTarget = null;
+    } else if (willSnap && nearPin) {
+      // Unconnected: preview-snap over the target pin to assign a connection.
       this._drag.group.position.set(nearPin.x, this._drag.planeY, nearPin.z);
+      this._updateSnapHighlight(nearest, nearest, def);
+      this._drag.snapTarget = nearest;
     } else {
       this._drag.group.position.set(point.x, this._drag.planeY, point.z);
+      this._updateSnapHighlight(nearest, null, def);
+      this._drag.snapTarget = null;
     }
-
-    this._updateSnapHighlight(nearest, willSnap ? nearest : null, def);
-    this._drag.snapTarget = willSnap ? nearest : null;
   }
 
   _onMouseUp(e) {
@@ -560,15 +716,17 @@ export class VirtualLabRenderer {
     const { uid, snapTarget } = this._drag;
     this.controls.enabled = true;
 
-    if (snapTarget) {
+    const comp = this.components[uid];
+    if (comp && comp.pinName) {
+      // Was already connected — keep the connection, wire just follows to the
+      // new position. Dragging a wired component never breaks the link.
+      this._updateWire(uid);
+    } else if (snapTarget) {
+      // Unconnected component snapped onto a pin — build the connection + wire.
       this.updateComponentPin(uid, snapTarget);
       if (this.onPinAssign) this.onPinAssign(uid, snapTarget);
-    } else {
-      // Leave floating — detach from pin
-      const comp = this.components[uid];
-      if (comp) comp.pinName = null;
-      if (this.onPinAssign) this.onPinAssign(uid, null);
     }
+    // else: unconnected, dropped in space — leave floating.
 
     this._hideSnapRings();
     this._drag = null;
@@ -683,11 +841,22 @@ export class VirtualLabRenderer {
     const tick = () => {
       this.animFrameId = requestAnimationFrame(tick);
       this.controls.update();
+      const dt = this._clock.getDelta();
 
       // Animate snap ring pulse every frame while dragging
       if (this._drag && this._drag.snapTarget && this._snapRings) {
         const def = BOARD_DEFS[this.currentBoard];
         this._updateSnapHighlight(this._drag.snapTarget, this._drag.snapTarget, def);
+      }
+
+      // Animate current flow along energized wires
+      for (const w of this.wires) {
+        if (w.energized && w.flowTex) {
+          w.flowTex.offset.x -= dt * 1.6;          // scroll packets toward component
+          w.flowMat.emissiveIntensity = 2.0;
+        } else if (w.flowMat) {
+          w.flowMat.emissiveIntensity = 0.0;
+        }
       }
 
       this.renderer.render(this.scene, this.camera);
@@ -715,6 +884,9 @@ export class VirtualLabRenderer {
         }
       });
     }
+    this._cancelWireDraw?.();
+    this.wires.forEach(w => w.flowTex?.dispose()); // meshes freed by boardGroup dispose
+    this.wires        = [];
     this.pinMap       = {};
     this.components   = {};
     this.pinMeshes    = [];
@@ -975,7 +1147,7 @@ export class VirtualLabRenderer {
     if (!def) return;
     const pinDef = def.pins[pinName];
     const pos = pinDef
-      ? new THREE.Vector3(pinDef.x, def.thickness / 2 + 6, pinDef.z)
+      ? this._componentOffsetPos(def, pinDef)
       : new THREE.Vector3((Math.random() - 0.5) * 60, def.thickness / 2 + 6, (Math.random() - 0.5) * 60);
     this._placeComponentMesh(uid, componentId, pos, pinName, cfg);
   }
@@ -1369,9 +1541,12 @@ export class VirtualLabRenderer {
 
     if (mesh) mesh.castShadow = true;
     this.components[uid] = { group, pinName, type: componentId, mesh, mat, light };
+    // Draw wire if placed on a pin
+    if (pinName) this._updateWire(uid);
   }
 
   removeComponent(uid) {
+    this._removeWire(uid);
     const comp = this.components[uid];
     if (!comp) return;
     this.boardGroup?.remove(comp.group);
@@ -1385,6 +1560,25 @@ export class VirtualLabRenderer {
     delete this.components[uid];
   }
 
+  // Compute outward-offset position for a component so it sits just outside the
+  // board edge nearest its pin — this creates visible space for the wire arc.
+  _componentOffsetPos(def, pinDef) {
+    const halfW = def.width / 2;
+    const halfL = def.length / 2;
+    const dLeft   = halfW + pinDef.x;
+    const dRight  = halfW - pinDef.x;
+    const dTop    = halfL - pinDef.z;
+    const dBottom = halfL + pinDef.z;
+    const minDist = Math.min(dLeft, dRight, dTop, dBottom);
+    const gap = 14; // mm outward from board edge
+    let ox = 0, oz = 0;
+    if (minDist === dLeft)   ox = -gap;
+    else if (minDist === dRight)  ox = +gap;
+    else if (minDist === dTop)    oz = +gap;
+    else                          oz = -gap;
+    return new THREE.Vector3(pinDef.x + ox, def.thickness / 2 + 6, pinDef.z + oz);
+  }
+
   updateComponentPin(uid, newPinName) {
     const comp = this.components[uid];
     if (!comp) return;
@@ -1392,8 +1586,262 @@ export class VirtualLabRenderer {
     if (!def) return;
     const pinDef = def.pins[newPinName];
     if (!pinDef) return;
-    comp.group.position.set(pinDef.x, def.thickness / 2 + 6, pinDef.z);
+    comp.group.position.copy(this._componentOffsetPos(def, pinDef));
     comp.pinName = newPinName;
+    this._updateWire(uid);
+  }
+
+  // ── Wire system ──────────────────────────────────────────────────────────────
+  // A repeating canvas of bright "current packets" on a dark strip. Scrolled along
+  // a tube's length to visualise current flow when the wire is energized.
+  _makeFlowCanvas() {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 8;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, 64, 8);
+    // Two bright packets per tile
+    for (const cx of [16, 48]) {
+      const grad = ctx.createLinearGradient(cx - 10, 0, cx + 10, 0);
+      grad.addColorStop(0,   'rgba(255,255,255,0)');
+      grad.addColorStop(0.5, 'rgba(255,255,255,1)');
+      grad.addColorStop(1,   'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx - 10, 0, 20, 8);
+    }
+    return c;
+  }
+
+  _wireColorFor(type) {
+    return type === 'led'    ? 0x00cc44
+      : type === 'buzzer'    ? 0xff8800
+      : type === 'servo'     ? 0xffcc00
+      : type === 'motor'     ? 0x33aaff
+      : 0xcccccc;
+  }
+
+  // Build the arc curve from a pin pad up to a component position.
+  _wireCurve(pinDef, compPos, boardY) {
+    const p0 = new THREE.Vector3(compPos.x, boardY + 1.5, compPos.z);
+    const midX = (compPos.x + pinDef.x) / 2;
+    const midZ = (compPos.z + pinDef.z) / 2;
+    const span = Math.hypot(compPos.x - pinDef.x, compPos.z - pinDef.z);
+    const arcHeight = boardY + Math.max(4, span * 0.3);
+    const p1 = new THREE.Vector3(midX, arcHeight, midZ);
+    const p2 = new THREE.Vector3(pinDef.x, boardY + 0.8, pinDef.z);
+    return new THREE.QuadraticBezierCurve3(p0, p1, p2);
+  }
+
+  _findWire(uid) { return this.wires.find(w => w.toUid === uid) || null; }
+
+  _disposeWire(wire) {
+    if (!wire) return;
+    this.boardGroup?.remove(wire.mesh);
+    wire.mesh.geometry.dispose();
+    wire.mesh.material.dispose();
+    wire.flowTex?.dispose();
+  }
+
+  // Create or rebuild the wire connecting a component to its assigned pin.
+  _updateWire(uid) {
+    const comp = this.components[uid];
+    if (!comp) return;
+
+    // Drop any existing wire for this component first.
+    const existing = this._findWire(uid);
+    if (existing) {
+      this._disposeWire(existing);
+      this.wires = this.wires.filter(w => w !== existing);
+    }
+
+    if (!comp.pinName) return;
+    const def = BOARD_DEFS[this.currentBoard];
+    if (!def) return;
+    const pinDef = def.pins[comp.pinName];
+    if (!pinDef) return;
+
+    const boardY = def.thickness / 2;
+    const curve  = this._wireCurve(pinDef, comp.group.position, boardY);
+    const length = curve.getLength();
+    const tube   = new THREE.TubeGeometry(
+      new THREE.CatmullRomCurve3(curve.getPoints(24)), 24, 0.28, 8, false,
+    );
+
+    const wireColor = this._wireColorFor(comp.type);
+    const flowTex = new THREE.CanvasTexture(this._flowCanvas);
+    flowTex.wrapS = flowTex.wrapT = THREE.RepeatWrapping;
+    flowTex.repeat.set(Math.max(2, length / 6), 1);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: wireColor, roughness: 0.55, metalness: 0.15,
+      emissive: wireColor, emissiveMap: flowTex, emissiveIntensity: 0,
+    });
+    const mesh = new THREE.Mesh(tube, mat);
+    this.boardGroup.add(mesh);
+
+    this.wires.push({
+      id: ++this._wireIdSeq, fromPin: comp.pinName, toUid: uid,
+      mesh, flowTex, flowMat: mat, energized: false, length,
+    });
+  }
+
+  _removeWire(uid) {
+    const wire = this._findWire(uid);
+    if (!wire) return;
+    this._disposeWire(wire);
+    this.wires = this.wires.filter(w => w !== wire);
+  }
+
+  // ── Interactive wire drawing (double-click a pin, drag, click a component) ────
+  _onDoubleClick(e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    const { x, y } = this._getNDC(e);
+    this._tryStartWireFromPin(x, y);
+  }
+
+  // Try to begin a wire draw from whatever pin is under / nearest to (nx,ny).
+  // Returns true if a wire draw was started.
+  _tryStartWireFromPin(nx, ny) {
+    this._raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
+
+    // 1. Direct hit on a pin post/pad.
+    const hits = this._raycaster.intersectObjects(this.pinMeshes.map(p => p.mesh), false);
+    if (hits.length && hits[0].object.userData.pinName) {
+      this._startWireDraw(hits[0].object.userData.pinName);
+      return true;
+    }
+
+    // 2. Forgiving fallback: nearest pin to where the ray meets the board plane.
+    const def = BOARD_DEFS[this.currentBoard];
+    if (!def) return false;
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(def.thickness / 2));
+    const point = new THREE.Vector3();
+    if (!this._raycaster.ray.intersectPlane(plane, point)) return false;
+    let best = null, bestD = Infinity;
+    Object.entries(def.pins).forEach(([name, pin]) => {
+      const d = Math.hypot(pin.x - point.x, pin.z - point.z);
+      if (d < bestD) { bestD = d; best = name; }
+    });
+    if (best && bestD < 6) { this._startWireDraw(best); return true; }
+    return false;
+  }
+
+  _startWireDraw(pinName) {
+    if (this._wireDraw) this._cancelWireDraw();
+    const def = BOARD_DEFS[this.currentBoard];
+    if (!def || !def.pins[pinName]) return;
+    const pin = def.pins[pinName];
+    const boardY = def.thickness / 2;
+    const fromPos = new THREE.Vector3(pin.x, boardY + 0.8, pin.z);
+
+    this.controls.enabled = false;
+    this._hideSnapRings();
+    this._wireDraw = {
+      fromPin: pinName,
+      fromPos,
+      toPoint: fromPos.clone().add(new THREE.Vector3(0, 6, 0)),
+      hoverUid: null,
+      mesh: null,
+    };
+    this._showSnapRings();        // reuse pin rings as visual affordance
+    this._rebuildWireDrawMesh();
+    this._tooltip.textContent = `Wiring ${pinName} — click a component to connect (Esc to cancel)`;
+    this._tooltip.style.display = 'block';
+  }
+
+  _doWireDraw(nx, ny, cx, cy) {
+    const wd = this._wireDraw;
+    if (!wd) return;
+    const def = BOARD_DEFS[this.currentBoard];
+    if (!def) return;
+
+    // Project the cursor onto a horizontal plane at typical component height.
+    const planeY = def.thickness / 2 + 6;
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
+    this._raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
+    const point = new THREE.Vector3();
+    if (!this._raycaster.ray.intersectPlane(plane, point)) return;
+
+    // Find nearest component to the free end.
+    let hoverUid = null, nearDist = Infinity, hoverPos = null;
+    Object.entries(this.components).forEach(([uid, comp]) => {
+      const p = comp.group.position;
+      const d = Math.hypot(p.x - point.x, p.z - point.z);
+      if (d < nearDist) { nearDist = d; hoverUid = uid; hoverPos = p; }
+    });
+
+    const HIT_RADIUS = 7; // mm
+    if (hoverUid && nearDist < HIT_RADIUS) {
+      wd.hoverUid = hoverUid;
+      wd.toPoint.set(hoverPos.x, planeY, hoverPos.z); // snap to component
+    } else {
+      wd.hoverUid = null;
+      wd.toPoint.copy(point);
+    }
+
+    this._rebuildWireDrawMesh();
+
+    // Tooltip follows cursor
+    this._tooltip.style.left = (cx + 14) + 'px';
+    this._tooltip.style.top  = (cy - 10) + 'px';
+    this._tooltip.textContent = wd.hoverUid
+      ? `Connect to ${this.components[wd.hoverUid].type.toUpperCase()} — click to attach`
+      : `Wiring ${wd.fromPin} — drag onto a component (Esc to cancel)`;
+  }
+
+  _rebuildWireDrawMesh() {
+    const wd = this._wireDraw;
+    if (!wd) return;
+    if (wd.mesh) {
+      this.boardGroup.remove(wd.mesh);
+      wd.mesh.geometry.dispose();
+      wd.mesh.material.dispose();
+      wd.mesh = null;
+    }
+    const def = BOARD_DEFS[this.currentBoard];
+    const boardY = def.thickness / 2;
+    const pinDef = def.pins[wd.fromPin];
+    const curve  = this._wireCurve(pinDef, wd.toPoint, boardY);
+    const tube   = new THREE.TubeGeometry(
+      new THREE.CatmullRomCurve3(curve.getPoints(24)), 24, 0.28, 8, false,
+    );
+    const color = wd.hoverUid ? 0x00ff88 : 0x66aaff;
+    const mat = new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: wd.hoverUid ? 0.9 : 0.4,
+      roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
+    });
+    wd.mesh = new THREE.Mesh(tube, mat);
+    this.boardGroup.add(wd.mesh);
+  }
+
+  _finishWireDraw() {
+    const wd = this._wireDraw;
+    if (!wd) return;
+    const target = wd.hoverUid;
+    this._cancelWireDraw(); // tears down preview + restores controls
+
+    if (target && this.components[target]) {
+      // Bind the component to this pin WITHOUT moving it — the wire spans the
+      // existing distance from the pin to wherever the component currently sits.
+      const comp = this.components[target];
+      comp.pinName = wd.fromPin;
+      this._updateWire(target);
+      if (this.onPinAssign) this.onPinAssign(target, wd.fromPin);
+    }
+  }
+
+  _cancelWireDraw() {
+    const wd = this._wireDraw;
+    if (!wd) return;
+    if (wd.mesh) {
+      this.boardGroup.remove(wd.mesh);
+      wd.mesh.geometry.dispose();
+      wd.mesh.material.dispose();
+    }
+    this._wireDraw = null;
+    this._hideSnapRings();
+    this._tooltip.style.display = 'none';
+    this.controls.enabled = true;
   }
 
   updateComponentColor(uid, colorHex) {
@@ -1429,6 +1877,14 @@ export class VirtualLabRenderer {
         if (comp.light) comp.light.intensity = 2.5;
       }
     });
+    this._setWireFlow(pinNumber, true);
+  }
+
+  // Toggle current-flow animation on every wire driven by this pin number.
+  _setWireFlow(pinNumber, on) {
+    for (const w of this.wires) {
+      if (parseInt(w.fromPin.replace(/[^\d]/g, '')) === pinNumber) w.energized = on;
+    }
   }
 
   _setPinLow(pinNumber) {
@@ -1445,6 +1901,7 @@ export class VirtualLabRenderer {
         if (comp.light) comp.light.intensity = 0;
       }
     });
+    this._setWireFlow(pinNumber, false);
   }
 
   _setPinPwm(pinNumber, ratio) {
@@ -1455,6 +1912,44 @@ export class VirtualLabRenderer {
         if (comp.light) comp.light.intensity = ratio * 2.5;
       }
     });
+    this._setWireFlow(pinNumber, ratio > 0.05);
+  }
+
+  // ── Serial overlay ─────────────────────────────────────────────────────────
+  _createSerialOverlay() {
+    const el = document.createElement('div');
+    el.style.cssText = `
+      position:fixed; bottom:80px; right:16px; width:260px; max-height:140px;
+      background:rgba(10,20,10,0.92); border:1px solid #00cc44; border-radius:6px;
+      font:12px/1.5 "Courier New",monospace; color:#00ee66; padding:8px 10px;
+      overflow-y:auto; display:none; z-index:9999; pointer-events:none;
+      box-shadow:0 2px 12px rgba(0,0,0,0.5);
+    `;
+    const header = document.createElement('div');
+    header.style.cssText = 'color:#00aa44; font-size:10px; margin-bottom:4px; border-bottom:1px solid #004422; padding-bottom:3px;';
+    header.textContent = '📡 Serial Monitor (sim)';
+    el.appendChild(header);
+    this._serialBody = document.createElement('div');
+    el.appendChild(this._serialBody);
+    document.body.appendChild(el);
+    return el;
+  }
+
+  _serialPrint(text) {
+    this._serialLines.push(text);
+    if (this._serialLines.length > 30) this._serialLines.shift();
+    if (this._serialBody) {
+      // Accumulate lines joining by empty string (println adds \n)
+      this._serialBody.textContent = this._serialLines.join('');
+      this._serialBody.parentElement.scrollTop = this._serialBody.parentElement.scrollHeight;
+    }
+    if (this._serialOverlay) this._serialOverlay.style.display = 'block';
+  }
+
+  _clearSerial() {
+    this._serialLines = [];
+    if (this._serialBody) this._serialBody.textContent = '';
+    if (this._serialOverlay) this._serialOverlay.style.display = 'none';
   }
 
   // ── Animation ──────────────────────────────────────────────────────────────
@@ -1483,6 +1978,8 @@ export class VirtualLabRenderer {
             else             this._setPinLow(entry.pin);
           } else if (entry.type === 'pwm') {
             this._setPinPwm(entry.pin, entry.value);
+          } else if (entry.type === 'serial') {
+            this._serialPrint(entry.text);
           }
         }, entry.t);
         this.animTimers.push(t);
@@ -1496,6 +1993,7 @@ export class VirtualLabRenderer {
     this.running = false;
     this.animTimers.forEach(t => clearTimeout(t));
     this.animTimers = [];
+    this._clearSerial();
     Object.values(this.pinMap).forEach(item => {
       item.mat.emissiveIntensity = 0.1;
       if (item.light) item.light.intensity = 0;
@@ -1504,12 +2002,18 @@ export class VirtualLabRenderer {
       if (comp.mat) comp.mat.emissiveIntensity = 0;
       if (comp.light) comp.light.intensity = 0;
     });
+    // De-energize all wires so current flow stops.
+    for (const w of this.wires) w.energized = false;
   }
 
   destroy() {
     this.stopAnimation();
     cancelAnimationFrame(this.animFrameId);
-    this._tooltip.remove();
+    if (this._onKeyDown) window.removeEventListener('keydown', this._onKeyDown);
+    this._cancelWireDraw?.();
+    this._tooltip?.remove();
+    this._ctxMenu?.remove();
+    this._serialOverlay?.remove();
     this.renderer.dispose();
   }
 }

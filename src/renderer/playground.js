@@ -627,18 +627,108 @@ function openInWokwi() {
   }
 }
 
-// ── AI Lab Setup ─────────────────────────────────────────────────────────────
-async function aiSetupLab() {
-  // 1. Get code from editor or disk
+// ── Multi-file sketch reader ──────────────────────────────────────────────────
+async function readFullSketchCode() {
+  // Primary: get from editor
   let code = window.state?.editor?.getValue?.() || '';
-  if (!code.trim()) {
-    const filePath = window.state?.currentFile;
-    if (filePath) {
-      try { code = await window.electronAPI.fs.read(filePath) || ''; } catch(e) {}
+
+  // Try to get all .ino files from the sketch folder
+  const currentFile = window.state?.currentFile;
+  if (currentFile) {
+    try {
+      const folderPath = currentFile.substring(0, currentFile.lastIndexOf('/'));
+      const listing = await window.electronAPI.folder.list(folderPath);
+      if (listing.success && listing.entries) {
+        const inoFiles = listing.entries
+          .filter(e => !e.isDirectory && e.name.toLowerCase().endsWith('.ino'))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        const readFile = async (p) => {
+          const r = await window.electronAPI.file.read(p).catch(() => null);
+          return (r && r.success) ? r.content : '';
+        };
+        if (inoFiles.length > 1) {
+          // Multiple .ino files — concatenate all
+          const parts = await Promise.all(inoFiles.map(f => readFile(f.path)));
+          code = parts.filter(Boolean).join('\n\n');
+        } else if (inoFiles.length === 1 && !code.trim()) {
+          code = await readFile(inoFiles[0].path);
+        } else if (!code.trim()) {
+          code = await readFile(currentFile);
+        }
+      }
+    } catch(e) {
+      if (!code.trim()) {
+        try {
+          const r = await window.electronAPI.file.read(currentFile);
+          code = (r && r.success) ? r.content : '';
+        } catch(_) {}
+      }
     }
   }
+  return code;
+}
+
+// Place a set of AI-determined components into the lab and start the animation.
+function applyAiComponents(components, board, code) {
+  // Clear existing components
+  [...labState.placedComponents].forEach(p => removeComponent(p.uid));
+
+  for (const item of components) {
+    const compDef = ALL_COMPONENTS.find(c => c.id === item.componentId);
+    if (!compDef) continue;
+
+    const uid = `comp_${labState.uidCounter++}`;
+    const cfg = { ...getDefaultPinConfig(compDef, board), ...(item.pins || {}) };
+
+    labState.placedComponents.push({ uid, componentId: item.componentId, cfg });
+
+    const pinName = cfg.pin || Object.values(cfg)[0] || null;
+    labState.renderer?.addComponent(uid, item.componentId, pinName, cfg);
+
+    if (item.color) {
+      const colorMap = { red: 0xff2200, green: 0x00cc44, yellow: 0xffcc00, blue: 0x0044ff, white: 0xffffff, orange: 0xff8800 };
+      const key = item.color.toLowerCase();
+      const hex = colorMap[key] || 0xff2200;
+      // Persist so the side-panel color dropdown reflects the AI's choice
+      if (colorMap[key]) cfg.ledColor = key;
+      labState.renderer?.updateComponentColor(uid, hex);
+    }
+  }
+
+  renderComponentList();
+  syncDiagramIfReady();
+  labState.renderer?.runAnimation(code);
+  labState.simRunning = true;
+  updateSimControls();
+}
+
+// ── AI Lab Setup ─────────────────────────────────────────────────────────────
+async function aiSetupLab() {
+  const aiBtn = document.getElementById('vlab-ai-setup-btn');
+  const setStep = (label, busy = true) => {
+    if (!aiBtn) return;
+    aiBtn.textContent = label;
+    aiBtn.disabled = busy;
+  };
+  const resetBtn = () => setStep('✨ AI Setup', false);
+
+  // 1. Get code (multi-file aware)
+  setStep('📖 Reading sketch…');
+  const code = await readFullSketchCode();
   if (!code.trim()) {
     showToast('No code found — open a file first');
+    resetBtn();
+    return;
+  }
+
+  // 1b. Skip the API call entirely if the code hasn't changed since last analysis.
+  if (labState._lastAiCode === code && Array.isArray(labState._lastAiComponents)) {
+    const board = BOARDS.find(b => b.id === labState.boardId);
+    setStep('🔧 Placing components…');
+    applyAiComponents(labState._lastAiComponents, board, code);
+    showToast('No code changes — reused last AI setup (no API call)');
+    resetBtn();
     return;
   }
 
@@ -673,10 +763,8 @@ Rules:
 - If a component has multiple pins (like DHT22 needs "pin"), include all required keys
 - Return [] if no recognizable components found`;
 
-  const aiBtn = document.getElementById('vlab-ai-setup-btn');
-  if (aiBtn) { aiBtn.textContent = '⏳ Analyzing…'; aiBtn.disabled = true; }
-
   try {
+    setStep('🤖 Calling AI…');
     const aiResult = await window.electronAPI.ai.openaiChat({
       model: 'gpt-4o-mini',
       temperature: 0,
@@ -688,6 +776,7 @@ Rules:
 
     if (!aiResult.success) throw new Error(aiResult.error || 'AI request failed');
 
+    setStep('🧩 Parsing result…');
     const raw = aiResult.content?.trim() || '[]';
     // Strip markdown code fences if present
     const jsonStr = raw.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
@@ -695,46 +784,25 @@ Rules:
 
     if (!Array.isArray(components) || components.length === 0) {
       showToast('AI found no components in this code');
+      resetBtn();
       return;
     }
 
-    // 4. Clear existing components and add the AI-determined ones
-    [...labState.placedComponents].forEach(p => removeComponent(p.uid));
+    // 4. Cache the analysis so an unchanged sketch won't trigger another API call
+    labState._lastAiCode = code;
+    labState._lastAiComponents = components;
 
-    for (const item of components) {
-      const compDef = ALL_COMPONENTS.find(c => c.id === item.componentId);
-      if (!compDef) continue;
+    // 5. Place the components and start the animation
+    setStep('🔧 Placing components…');
+    applyAiComponents(components, board, code);
 
-      const uid = `comp_${labState.uidCounter++}`;
-      const cfg = { ...getDefaultPinConfig(compDef, board), ...(item.pins || {}) };
-
-      labState.placedComponents.push({ uid, componentId: item.componentId, cfg });
-
-      const pinName = cfg.pin || Object.values(cfg)[0] || null;
-      labState.renderer?.addComponent(uid, item.componentId, pinName, cfg);
-
-      // Apply color if provided
-      if (item.color) {
-        const colorMap = { red: 0xff2200, green: 0x00cc44, yellow: 0xffcc00, blue: 0x0044ff, white: 0xffffff, orange: 0xff8800 };
-        const hex = colorMap[item.color.toLowerCase()] || 0xff2200;
-        labState.renderer?.updateComponentColor(uid, hex);
-      }
-    }
-
-    renderComponentList();
-    syncDiagramIfReady();
-
-    // 5. Auto-run the animation
-    labState.renderer?.runAnimation(code);
-    labState.simRunning = true;
-    updateSimControls();
-
+    setStep('▶ Starting animation…');
     showToast(`✨ AI set up ${components.length} component${components.length > 1 ? 's' : ''} and started animation`);
   } catch(e) {
     console.error('AI setup error:', e);
     showToast(`AI setup failed: ${e.message}`);
   } finally {
-    if (aiBtn) { aiBtn.textContent = '✨ AI Setup'; aiBtn.disabled = false; }
+    resetBtn();
   }
 }
 
@@ -931,6 +999,7 @@ function renderComponentList() {
         { value: 'green',  label: 'Green',  hex: '#00cc44' },
         { value: 'blue',   label: 'Blue',   hex: '#0044ff' },
         { value: 'white',  label: 'White',  hex: '#ffffff' },
+        { value: 'orange', label: 'Orange', hex: '#ff8800' },
       ];
       const colorOpts = colorOptions.map(c =>
         `<option value="${c.value}" ${ledColor === c.value ? 'selected' : ''}>${c.label}</option>`
@@ -970,13 +1039,14 @@ function renderComponentList() {
           if (sel.value) {
             labState.renderer?.updateComponentPin(uid, sel.value);
           } else {
-            // Detach — leave floating
+            // Detach — leave floating and remove its wire
             const comp = labState.renderer?.components?.[uid];
             if (comp) comp.pinName = null;
+            labState.renderer?._removeWire(uid);
           }
         }
         if (key === 'ledColor') {
-          const colorMap = { red: 0xff2200, yellow: 0xffcc00, green: 0x00cc44, blue: 0x0044ff, white: 0xffffff };
+          const colorMap = { red: 0xff2200, yellow: 0xffcc00, green: 0x00cc44, blue: 0x0044ff, white: 0xffffff, orange: 0xff8800 };
           labState.renderer?.updateComponentColor(uid, colorMap[sel.value] || 0xff2200);
         }
         syncDiagramIfReady();
@@ -1206,14 +1276,9 @@ function buildPlaygroundUI() {
   document.getElementById('vlab-run-btn')?.addEventListener('click', async () => {
     if (!labState.simRunning) {
       let editorCode = window.state?.editor?.getValue?.() || '';
-      // If editor is empty, try reading the currently open file from disk
+      // If editor is empty, use multi-file sketch reader
       if (!editorCode.trim()) {
-        const filePath = window.state?.currentFile;
-        if (filePath) {
-          try {
-            editorCode = await window.electronAPI.fs.read(filePath) || '';
-          } catch(e) { /* ignore */ }
-        }
+        editorCode = await readFullSketchCode();
       }
       const board      = BOARDS.find(b => b.id === labState.boardId);
       const ledPin     = board ? (board.digitalPins[1] || board.digitalPins[0] || 'D2') : 'D2';
@@ -1283,6 +1348,21 @@ function initRenderer() {
         renderComponentList();
         syncDiagramIfReady();
       }
+    },
+    onComponentDisconnect(uid) {
+      // Right-click → Disconnect: clear the pin in the side panel
+      const placed = labState.placedComponents.find(c => c.uid === uid);
+      if (placed) {
+        placed.cfg.pin = null;
+        renderComponentList();
+        syncDiagramIfReady();
+      }
+    },
+    onComponentDelete(uid) {
+      // Right-click → Delete: remove from state (3D mesh already removed by renderer)
+      labState.placedComponents = labState.placedComponents.filter(c => c.uid !== uid);
+      renderComponentList();
+      syncDiagramIfReady();
     },
   });
   labState.renderer.loadBoard(labState.boardId);

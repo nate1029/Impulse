@@ -41,8 +41,9 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
     "@google/generative-ai": "^0.24.1",
-    "@rollup/rollup-win32-x64-msvc": "^4.57.1",
     "@serialport/parser-readline": "^12.0.0",
+    "@wokwi/elements": "^1.9.2",
+    "avr8js": "^0.21.0",
     "chokidar": "^3.5.3",
     "codemirror": "^5.65.18",
     "electron-store": "^8.1.0",

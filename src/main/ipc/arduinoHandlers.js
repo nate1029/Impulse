@@ -35,6 +35,10 @@ function register(ipcMain, ctx) {
     }
   }));
 
+  ipcMain.handle('arduino:compile-hex', withDebugLog('arduino:compile-hex', async (event, sketchPath, boardFQBN) => {
+    return arduinoService.compileHex(sketchPath, boardFQBN);
+  }));
+
   ipcMain.handle('arduino:upload', withDebugLog('arduino:upload', async (event, sketchPath, boardFQBN, port) => {
     const parsed = parseOrDefault(schemas.arduinoUpload, { sketchPath: sketchPath ?? '', boardFQBN: boardFQBN ?? '', port: port ?? '' }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;

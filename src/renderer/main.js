@@ -9,6 +9,7 @@ import 'codemirror/addon/hint/show-hint.css';
 
 // --- App CSS ---
 import './styles.css';
+import './simulation/simulation.css';
 
 // --- CodeMirror JS (bundled locally, no CDN) ---
 import CodeMirror from 'codemirror';

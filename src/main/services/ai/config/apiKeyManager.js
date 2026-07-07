@@ -7,10 +7,24 @@ const crypto = require('crypto');
  */
 class APIKeyManager {
   constructor() {
-    this.store = new Store({
+    const options = {
       name: 'api-keys',
       encryptionKey: this.getEncryptionKey()
-    });
+    };
+    try {
+      this.store = new Store(options);
+    } catch (err) {
+      // The store can't be decrypted (the encryption key derives from the
+      // hostname, which changes with the network). Reset it instead of
+      // crashing the app — the user re-enters their keys once.
+      try {
+        const path = require('path');
+        const fs = require('fs');
+        const { app } = require('electron');
+        fs.rmSync(path.join(app.getPath('userData'), 'api-keys.json'), { force: true });
+      } catch { /* best effort */ }
+      this.store = new Store(options);
+    }
   }
 
   /**

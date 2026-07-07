@@ -4,6 +4,7 @@
  */
 
 const AIAgent = require('../services/ai/agent');
+const { generateCircuit } = require('../services/ai/circuitGenerator');
 const { parseOrDefault, schemas } = require('./schemas');
 const { withDebugLog } = require('../utils/logger');
 
@@ -32,6 +33,17 @@ function register(ipcMain, ctx) {
       return { success: true, provider: parsed.data.providerName, model: parsed.data.model || 'default' };
     } catch (error) {
       return { success: false, error: error?.message ?? 'Set provider failed' };
+    }
+  }));
+
+  ipcMain.handle('ai:generate-circuit', withDebugLog('ai:generate-circuit', async (event, sketchCode) => {
+    if (typeof sketchCode !== 'string' || sketchCode.length > 200000) {
+      return { success: false, error: 'Invalid sketch code' };
+    }
+    try {
+      return await generateCircuit(aiAgent, sketchCode);
+    } catch (error) {
+      return { success: false, error: error?.message ?? 'Circuit generation failed' };
     }
   }));
 

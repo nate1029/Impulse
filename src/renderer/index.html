@@ -146,6 +146,15 @@
                             <path d="M7 9l3 3-3 3M13 15h4" />
                         </svg>
                     </button>
+                    <button class="activity-icon" data-panel="simulate" title="2D Simulator (Ctrl+Shift+S)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="2" y="3" width="20" height="14" rx="2"/>
+                            <path d="M8 21h8M12 17v4"/>
+                            <circle cx="9" cy="10" r="2" fill="currentColor" opacity="0.7"/>
+                            <path d="M13 10h4" stroke-linecap="round"/>
+                            <path d="M13 13h2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
                 </div>
                 <div class="activity-bar-bottom">
                     <button class="activity-icon activity-theme-toggle" id="themeToggleBtn"
@@ -353,6 +362,26 @@
                     </div>
                 </div>
 
+                <!-- Simulate Panel -->
+                <div class="sidebar-panel" id="simulatePanel">
+                    <div class="sidebar-header">
+                        <span class="sidebar-title">SIMULATOR</span>
+                        <button class="sidebar-collapse-btn" title="Collapse">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M15 18l-6-6 6-6" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="sidebar-content">
+                        <div class="sim-hint">
+                            Add components from the library on the right.<br>
+                            Connect pins by clicking them.<br>
+                            Press <strong>Run</strong> to simulate.<br><br>
+                            <kbd>Ctrl+Shift+S</kbd> toggles the simulator.
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Serial Panel -->
                 <div class="sidebar-panel" id="serialPanel">
                     <div class="sidebar-header">
@@ -390,7 +419,7 @@
             <div id="sidebarResizer" class="resizer-vertical"></div>
 
             <!-- Main Content Area (Explorer is a step down; toolbar is in top-row above) -->
-            <div class="main-area" id="arduinoWorkspace">
+            <div class="main-area" id="arduinoWorkspace" style="flex-direction:column;">
                 <!-- Board/Port Selection Modal -->
                 <div id="boardPortModal" class="board-port-modal">
                     <div class="board-port-modal-content">
@@ -532,6 +561,11 @@
                         </div>
                     </div>
                 </div>
+            </div>
+            <!-- Simulation View (Wokwi-style: editor left, live circuit right) -->
+            <div class="sim-view" id="simView">
+                <div id="simEditorSlot"></div>
+                <div id="simPanel"></div>
             </div>
         </div>
         <!-- end workspace-row -->

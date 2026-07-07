@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Arduino CLI methods
   arduino: {
     compile: (sketchPath, boardFQBN) => ipcRenderer.invoke('arduino:compile', sketchPath, boardFQBN),
+    compileHex: (sketchPath, boardFQBN) => ipcRenderer.invoke('arduino:compile-hex', sketchPath, boardFQBN),
     upload: (sketchPath, boardFQBN, port) => ipcRenderer.invoke('arduino:upload', sketchPath, boardFQBN, port),
     listBoards: () => ipcRenderer.invoke('arduino:list-boards'),
     listPorts: () => ipcRenderer.invoke('arduino:list-ports'),
@@ -104,6 +105,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ai: {
     setProvider: (providerName, apiKey, model) => ipcRenderer.invoke('ai:set-provider', providerName, apiKey, model),
     processQuery: (query, context, mode) => ipcRenderer.invoke('ai:process-query', query, context, mode),
+    generateCircuit: (sketchCode) => ipcRenderer.invoke('ai:generate-circuit', sketchCode),
     setModel: (modelId, manual) => ipcRenderer.invoke('ai:set-model', modelId, manual),
     getModelSuggestion: () => ipcRenderer.invoke('ai:get-model-suggestion'),
     pinModel: (modelId) => ipcRenderer.invoke('ai:pin-model', modelId),
@@ -210,6 +212,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   app: {
     quit: () => ipcRenderer.send('app:quit')
+  },
+  clipboard: {
+    readText: () => ipcRenderer.invoke('clipboard:read-text'),
+    writeText: (text) => ipcRenderer.invoke('clipboard:write-text', text)
   },
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   menu: {

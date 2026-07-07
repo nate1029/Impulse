@@ -4,6 +4,7 @@
 // ============================================
 
 import { getCodeMirror } from './codemirror-ref.js';
+import { SimulationManager } from './simulation/index.js';
 
 // UI State — exposed on window so other modules (validation.js, etc.) can access it
 // without relying on bundler scope-hoisting accidents.
@@ -276,6 +277,51 @@ function setupNativeMenuListener() {
     }
 }
 
+// The focused plain text field, or null if focus is elsewhere (e.g. CodeMirror).
+function focusedTextField() {
+    const el = document.activeElement;
+    if (!el) return null;
+    const tag = el.tagName;
+    if ((tag === 'INPUT' || tag === 'TEXTAREA') && !el.closest('.CodeMirror')) return el;
+    return null;
+}
+
+// Cut/copy/paste that works in every text field, not just the code editor.
+// Needed because the Edit-menu accelerators swallow Cmd+X/C/V before the DOM
+// sees them, and execCommand('paste') is a no-op in Electron renderers.
+async function editClipboardAction(kind) {
+    const field = focusedTextField();
+
+    if (kind === 'paste') {
+        const text = await window.electronAPI.clipboard.readText();
+        if (!text) return;
+        if (field) {
+            const start = field.selectionStart ?? field.value.length;
+            const end = field.selectionEnd ?? field.value.length;
+            field.setRangeText(text, start, end, 'end');
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+        } else if (state.editor) {
+            state.editor.replaceSelection(text);
+            state.editor.focus();
+        }
+        return;
+    }
+
+    // cut / copy
+    let selected = '';
+    if (field) {
+        selected = field.value.slice(field.selectionStart ?? 0, field.selectionEnd ?? 0);
+        if (kind === 'cut' && selected) {
+            field.setRangeText('', field.selectionStart, field.selectionEnd, 'start');
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    } else if (state.editor) {
+        selected = state.editor.getSelection();
+        if (kind === 'cut' && selected) state.editor.replaceSelection('');
+    }
+    if (selected) await window.electronAPI.clipboard.writeText(selected);
+}
+
 function handleMenuAction(action) {
     switch (action) {
         // File
@@ -318,23 +364,28 @@ function handleMenuAction(action) {
             break;
         // Edit
         case 'edit-undo':
-            if (state.editor) state.editor.undo();
+            if (focusedTextField()) document.execCommand('undo');
+            else if (state.editor) state.editor.undo();
             break;
         case 'edit-redo':
-            if (state.editor) state.editor.redo();
+            if (focusedTextField()) document.execCommand('redo');
+            else if (state.editor) state.editor.redo();
             break;
         case 'edit-cut':
-            if (state.editor) document.execCommand('cut');
+            editClipboardAction('cut');
             break;
         case 'edit-copy':
-            if (state.editor) document.execCommand('copy');
+            editClipboardAction('copy');
             break;
         case 'edit-paste':
-            if (state.editor) document.execCommand('paste');
+            editClipboardAction('paste');
             break;
-        case 'edit-select-all':
-            if (state.editor) state.editor.execCommand('selectAll');
+        case 'edit-select-all': {
+            const field = focusedTextField();
+            if (field) field.select();
+            else if (state.editor) state.editor.execCommand('selectAll');
             break;
+        }
         case 'edit-goto-line':
             gotoLine();
             break;
@@ -4355,11 +4406,101 @@ function updateBoardPortDisplay(boardName, port) {
 function setButtonState(buttonId, disabled, text) {
     const btn = document.getElementById(buttonId);
     if (!btn) return;
-    // These are icon-only buttons. Don't inject text (it gets clipped by the
-    // fixed-width, overflow:hidden button). Toggle a CSS busy/spinner state and
-    // expose the status to assistive tech via aria-label, keeping the icon + title.
     btn.disabled = !!disabled;
     btn.classList.toggle('busy', !!disabled);
     btn.setAttribute('aria-busy', disabled ? 'true' : 'false');
     if (text) btn.setAttribute('aria-label', text);
 }
+
+// ============================================
+// Simulation Panel
+// ============================================
+
+let simManager = null;
+let simActive = false;
+
+function setupSimulation() {
+    const simView = document.getElementById('simView');
+    const simEditorSlot = document.getElementById('simEditorSlot');
+    if (!simView || !simEditorSlot) return;
+
+    simManager = new SimulationManager();
+    window.simManager = simManager;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Delay to let renderer.js initialize first
+    setTimeout(() => {
+        setupSimulation();
+        patchActivityBarForSim();
+    }, 500);
+});
+
+function patchActivityBarForSim() {
+    const simIcon = document.querySelector('.activity-icon[data-panel="simulate"]');
+    if (!simIcon) return;
+
+    simIcon.addEventListener('click', (e) => {
+        e.stopImmediatePropagation();
+        toggleSimView();
+    });
+}
+
+function toggleSimView() {
+    const simView = document.getElementById('simView');
+    const editorContainer = document.querySelector('.editor-container');
+    const simEditorSlot = document.getElementById('simEditorSlot');
+    const workspaceRow = document.getElementById('arduinoWorkspace');
+
+    if (!simView || !editorContainer) return;
+
+    simActive = !simActive;
+
+    // Update activity icon active state
+    document.querySelectorAll('.activity-icon[data-panel]').forEach(i => i.classList.remove('active'));
+    if (simActive) {
+        document.querySelector('.activity-icon[data-panel="simulate"]')?.classList.add('active');
+    }
+
+    const sidebar = document.getElementById('sidebar');
+    const resizer = document.getElementById('sidebarResizer');
+
+    if (simActive) {
+        // Move editor into sim slot so it stays live
+        if (simEditorSlot && editorContainer && !simEditorSlot.contains(editorContainer)) {
+            simEditorSlot.appendChild(editorContainer);
+        }
+        simView.style.display = 'flex';
+        simView.style.flex = '1';
+        simView.style.minHeight = '0';
+
+        if (sidebar) sidebar.style.display = 'none';
+        if (resizer) resizer.style.display = 'none';
+        // main-area is empty while the editor lives in the sim slot — collapse it
+        if (workspaceRow) workspaceRow.style.display = 'none';
+
+        // Refresh editor layout after the move
+        setTimeout(() => window.state?.editor?.refresh?.(), 50);
+    } else {
+        // Move editor back into the main workspace area
+        if (workspaceRow) {
+            workspaceRow.style.display = '';
+            if (editorContainer && editorContainer.parentNode !== workspaceRow) {
+                workspaceRow.appendChild(editorContainer);
+            }
+        }
+        simView.style.display = 'none';
+        if (sidebar) sidebar.style.display = '';
+        if (resizer) resizer.style.display = '';
+        document.querySelector('.activity-icon[data-panel="explorer"]')?.click();
+        setTimeout(() => window.state?.editor?.refresh?.(), 50);
+    }
+}
+
+// Keyboard shortcut Ctrl+Shift+S
+document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'S') {
+        e.preventDefault();
+        toggleSimView();
+    }
+});

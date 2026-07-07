@@ -1,0 +1,408 @@
+/* ═══ Wokwi-style 2D Simulator ═══════════════════════════════════════════ */
+
+.sim-view {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: row;
+  background: var(--bg-primary, #0d1117);
+}
+.sim-view.active { display: flex; }
+
+/* Left pane holds the live code editor */
+#simEditorSlot {
+  flex: 0 0 45%;
+  min-width: 280px;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Right pane: the simulation panel */
+#simPanel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ── Stage (canvas + overlays) ─────────────────────────────────────────── */
+
+.sim-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #e8e8e8; /* Wokwi light gray canvas */
+}
+
+.sim-canvas-wrap {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: default;
+  touch-action: none;
+}
+
+.sim-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  overflow: visible;
+}
+
+.sim-wires-svg,
+.sim-pins-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4000px;
+  height: 4000px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.sim-parts-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+}
+
+.sim-part {
+  position: absolute;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.sim-part:active { cursor: grabbing; }
+.sim-part.selected {
+  outline: 2px dashed #2196f3;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* Wires */
+.sim-wire {
+  fill: none;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.sim-wire:hover { stroke-width: 4; }
+.sim-wire.selected {
+  stroke-width: 4.5;
+  filter: drop-shadow(0 0 3px currentColor);
+  stroke-dasharray: 8 4;
+  animation: sim-wire-march 0.5s linear infinite;
+}
+@keyframes sim-wire-march {
+  to { stroke-dashoffset: -12; }
+}
+.sim-wire-temp {
+  stroke-dasharray: 5 4;
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+/* Pin dots */
+.sim-pin-dot {
+  fill: rgba(76, 175, 80, 0.18);
+  stroke: transparent;
+  pointer-events: all;
+  cursor: crosshair;
+}
+.sim-pin-dot.hover,
+.sim-pin-dot:hover {
+  fill: rgba(76, 175, 80, 0.45);
+  stroke: #1b5e20;
+  stroke-width: 1.5;
+}
+
+/* Pin tooltip */
+.sim-pin-tooltip {
+  position: absolute;
+  z-index: 40;
+  background: #222;
+  color: #fff;
+  font: 11px/1.4 'Inter', sans-serif;
+  padding: 3px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+
+/* ── Floating action buttons (Wokwi style) ─────────────────────────────── */
+
+.sim-fabs {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  gap: 10px;
+  z-index: 30;
+}
+
+.sim-fab {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+  transition: transform 0.12s, box-shadow 0.12s, background 0.2s;
+}
+.sim-fab:hover {
+  transform: scale(1.07);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.sim-fab:active { transform: scale(0.97); }
+
+.sim-fab-play  { background: #4caf50; }
+.sim-fab-play:hover { background: #43a047; }
+.sim-fab-play.compiling {
+  background: #ff9800;
+  animation: sim-pulse 1s infinite;
+}
+.sim-fab-stop  { background: #757575; }
+.sim-fab-stop:hover { background: #d32f2f; }
+.sim-fab-pause { background: #757575; }
+.sim-fab-pause:hover { background: #616161; }
+.sim-fab-add   { background: #1e88e5; }
+.sim-fab-add:hover { background: #1976d2; }
+.sim-fab-menu  { background: #757575; }
+.sim-fab-menu:hover { background: #616161; }
+.sim-fab-ai    { background: #8e24aa; }
+.sim-fab-ai:hover { background: #7b1fa2; }
+.sim-fab-ai.working {
+  background: #ab47bc;
+  animation: sim-spin 1.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes sim-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes sim-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ── Sim time + speed stats (top right, Wokwi style) ───────────────────── */
+
+.sim-stats {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 16px;
+  z-index: 30;
+  font: 500 14px/1 'JetBrains Mono', monospace;
+  color: #333;
+  background: rgba(255,255,255,0.75);
+  padding: 8px 12px;
+  border-radius: 6px;
+  backdrop-filter: blur(2px);
+}
+.sim-stats-time, .sim-stats-speed {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ── Component picker (Wokwi's dark dropdown) ──────────────────────────── */
+
+.sim-picker {
+  position: absolute;
+  top: 14px;
+  left: 70px;
+  width: 340px;
+  max-height: calc(100% - 40px);
+  display: flex;
+  flex-direction: column;
+  background: #1c1c1c;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.sim-picker-search {
+  position: relative;
+  padding: 10px 12px 8px;
+  border-bottom: 2px solid #2196f3;
+}
+.sim-picker-search input {
+  width: 100%;
+  background: #111;
+  border: none;
+  outline: none;
+  color: #eee;
+  font: 14px 'Inter', sans-serif;
+  padding: 8px 32px 8px 10px;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+.sim-picker-search svg {
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #888;
+}
+
+.sim-picker-list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sim-picker-cat {
+  background: #2a2a2a;
+  color: #bbb;
+  font: 600 12px/1 'Inter', sans-serif;
+  padding: 10px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.sim-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.sim-picker-item:hover { background: #333; }
+
+.sim-picker-thumb {
+  width: 52px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+.sim-picker-thumb > * {
+  transform: scale(0.38);
+  transform-origin: center;
+  pointer-events: none;
+}
+
+.sim-picker-name {
+  color: #eee;
+  font: 14px 'Inter', sans-serif;
+}
+
+/* ── ⋮ menu ────────────────────────────────────────────────────────────── */
+
+.sim-menu {
+  position: absolute;
+  top: 66px;
+  left: 122px;
+  background: #1c1c1c;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  z-index: 50;
+  min-width: 160px;
+  padding: 4px 0;
+}
+.sim-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #eee;
+  font: 13px 'Inter', sans-serif;
+  padding: 9px 16px;
+  cursor: pointer;
+}
+.sim-menu-item:hover { background: #333; }
+
+/* ── Serial monitor pane (bottom, Wokwi style) ─────────────────────────── */
+
+.sim-serial-pane {
+  flex-shrink: 0;
+  height: 160px;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-top: 1px solid #ccc;
+}
+
+.sim-serial-out {
+  flex: 1;
+  overflow-y: auto;
+  font: 13px/1.45 'JetBrains Mono', monospace;
+  color: #111;
+  background: #fff;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.sim-serial-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid #ddd;
+  padding: 6px 10px;
+  background: #fafafa;
+}
+.sim-serial-inputrow input {
+  flex: 1;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font: 13px 'JetBrains Mono', monospace;
+  outline: none;
+  background: #fff;
+  color: #111;
+}
+.sim-serial-inputrow input:focus { border-color: #2196f3; }
+
+.sim-serial-btn {
+  border: 1px solid #ccc;
+  background: #fff;
+  color: #444;
+  border-radius: 4px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.sim-serial-btn:hover { background: #eee; }
+
+/* ── Dark theme adjustments ────────────────────────────────────────────── */
+
+[data-theme="dark"] .sim-stage { background: #d7d7d7; }
+[data-theme="dark"] .sim-serial-pane { background: #111; border-top-color: #333; }
+[data-theme="dark"] .sim-serial-out { background: #111; color: #4caf50; }
+[data-theme="dark"] .sim-serial-inputrow { background: #181818; border-top-color: #333; }
+[data-theme="dark"] .sim-serial-inputrow input { background: #222; color: #eee; border-color: #444; }
+[data-theme="dark"] .sim-serial-btn { background: #222; color: #ccc; border-color: #444; }
+[data-theme="dark"] .sim-serial-btn:hover { background: #333; }
+[data-theme="dark"] .sim-stats { background: rgba(30,30,30,0.8); color: #eee; }
+
+/* ── Hide sidebar when sim is active ───────────────────────────────────── */
+.hidden-for-sim { display: none !important; }

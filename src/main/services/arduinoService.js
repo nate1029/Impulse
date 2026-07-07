@@ -18,7 +18,15 @@ const notifications = require('../utils/notifications');
  */
 class ArduinoService {
   constructor() {
-    this.cliPath = 'arduino-cli';
+    // GUI-launched apps on macOS don't inherit the shell PATH, so prefer a
+    // known absolute install location before falling back to PATH lookup.
+    const fsSync = require('fs');
+    const candidates = [
+      '/usr/local/bin/arduino-cli',
+      '/opt/homebrew/bin/arduino-cli',
+      path.join(require('os').homedir(), 'bin', 'arduino-cli'),
+    ];
+    this.cliPath = candidates.find(p => { try { return fsSync.existsSync(p); } catch { return false; } }) || 'arduino-cli';
     this.coreIndexed = false;
   }
 
@@ -585,6 +593,53 @@ class ArduinoService {
         metadata: { sketchPath, boardFQBN }
       });
     }
+  }
+
+  /**
+   * Compile sketch and return the generated .hex file content for simulation.
+   */
+  async compileHex(sketchPath, boardFQBN) {
+    const os = require('os');
+    const fs = require('fs');
+    const outputDir = path.join(os.tmpdir(), `impulse-hex-${Date.now()}`);
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    return new Promise((resolve) => {
+      const args = [
+        'compile',
+        '--fqbn', boardFQBN,
+        '--output-dir', outputDir,
+        sketchPath,
+      ];
+
+      const proc = spawn(this.cliPath, args, { cwd: path.dirname(sketchPath), timeout: 120000 });
+      let stderr = '';
+
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          fs.rmSync(outputDir, { recursive: true, force: true });
+          resolve({ success: false, error: stderr });
+          return;
+        }
+        // Find .hex file
+        const files = fs.readdirSync(outputDir);
+        const hexFile = files.find(f => f.endsWith('.hex'));
+        if (!hexFile) {
+          fs.rmSync(outputDir, { recursive: true, force: true });
+          resolve({ success: false, error: 'No .hex output found' });
+          return;
+        }
+        const hex = fs.readFileSync(path.join(outputDir, hexFile), 'utf8');
+        fs.rmSync(outputDir, { recursive: true, force: true });
+        resolve({ success: true, hex });
+      });
+
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
   }
 
   /**

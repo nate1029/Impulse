@@ -95,6 +95,10 @@ export class AvrRunner {
       this.usart.onByteTransmit = (byte) => {
         if (this.onSerial) this.onSerial(String.fromCharCode(byte));
       };
+      // RX pacing: the UART accepts one byte per character time, so queue
+      // input and feed the next byte whenever the previous one is consumed.
+      this._rxQueue = [];
+      this.usart.onRxComplete = () => this._pumpRx();
 
       this.adc = new AVRADC(this.cpu, adcConfig);
       this._pushAnalog();
@@ -167,6 +171,20 @@ export class AvrRunner {
     this._externalDrive[arduinoPin] = high;
     const port = this._getPort(m.port);
     if (port) port.setPin(m.bit, high);
+  }
+
+  // Queue text for the simulated UART; bytes are fed at line rate.
+  serialWrite(text) {
+    if (!this.usart) return;
+    for (const ch of text) this._rxQueue.push(ch.charCodeAt(0) & 0xff);
+    this._pumpRx();
+  }
+
+  _pumpRx() {
+    if (!this.usart || !this._rxQueue) return;
+    while (this._rxQueue.length && this.usart.writeByte(this._rxQueue[0])) {
+      this._rxQueue.shift();
+    }
   }
 
   // Release external drive; pin floats (pull-up snaps it high if enabled)

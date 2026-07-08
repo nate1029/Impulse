@@ -85,12 +85,13 @@ export class CircuitCanvas {
     this.partsLayer.appendChild(el);
     this.parts.push(part);
 
-    // Drag + select
+    // Drag + select. Interactive parts (buttons) also notify the manager so it
+    // can drive the press — the manager's own listeners on the shadow element
+    // don't fire reliably under this layer, so the canvas owns the hand-off.
     el.addEventListener('pointerdown', (e) => {
-      // Let interactive sub-elements (button caps, pot knobs) work while running;
-      // hold no modifier = drag part. Wokwi drags from anywhere on the part.
       if (e.button !== 0) return;
       this._select(part);
+      if (this.onPartPointerDown) this.onPartPointerDown(part, e);
       this._drag = {
         part,
         startX: part.x,
@@ -99,6 +100,12 @@ export class CircuitCanvas {
         py: e.clientY,
         moved: false,
       };
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (this.onPartPointerUp) this.onPartPointerUp(part, e);
+    });
+    el.addEventListener('pointerleave', (e) => {
+      if (this.onPartPointerUp) this.onPartPointerUp(part, e);
     });
 
     // Pin overlay dots after element renders
@@ -359,10 +366,31 @@ export class CircuitCanvas {
 
   zoomFit() {
     if (!this.parts.length) return;
-    // Basic: reset
-    this._scale = 1;
-    this._panX = 40;
-    this._panY = 40;
+
+    // Bounding box of all parts in world coordinates. Part elements live inside
+    // the scaled viewport, so offsetWidth/Height give unscaled layout size.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of this.parts) {
+      const w = p.el.offsetWidth || 100;
+      const h = p.el.offsetHeight || 100;
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + w);
+      maxY = Math.max(maxY, p.y + h);
+    }
+    if (!isFinite(minX)) return;
+
+    const pad = 40;
+    const contentW = (maxX - minX) + pad * 2;
+    const contentH = (maxY - minY) + pad * 2;
+    const rect = this.root.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const scale = Math.min(rect.width / contentW, rect.height / contentH, 1.5);
+    this._scale = Math.max(0.25, scale);
+    // Center the content in the viewport
+    this._panX = (rect.width - (maxX - minX) * this._scale) / 2 - minX * this._scale;
+    this._panY = (rect.height - (maxY - minY) * this._scale) / 2 - minY * this._scale;
     this._applyTransform();
   }
 

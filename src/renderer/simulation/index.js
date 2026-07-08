@@ -101,6 +101,10 @@ export class SimulationManager {
       this._rebuildNets();
       this._save();
     };
+    // The canvas hands off part interactions here (its pointer handlers fire
+    // reliably; listeners on the shadow element do not under the drag layer).
+    this.canvas.onPartPointerDown = (part) => this._onPartPress(part);
+    this.canvas.onPartPointerUp = (part) => this._onPartRelease(part);
 
     this._buildPicker();
 
@@ -130,10 +134,10 @@ export class SimulationManager {
     // Serial input → AVR RX
     const serialInput = document.getElementById('simSerialInput');
     serialInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && this.running && this.runner.usart) {
+      if (e.key === 'Enter' && this.running) {
         const text = serialInput.value + '\n';
         serialInput.value = '';
-        for (const ch of text) this.runner.usart.writeByte(ch.charCodeAt(0));
+        this.runner.serialWrite(text);
       }
     });
     document.getElementById('simSerialClear').addEventListener('click', () => this._clearSerial());
@@ -367,24 +371,43 @@ export class SimulationManager {
       if (part._simHandlersAttached) continue;
       part._simHandlersAttached = true;
 
-      if (part.type === 'wokwi-pushbutton' || part.type === 'wokwi-pushbutton-6mm') {
-        part.el.addEventListener('button-press', () => this._setButton(part, true));
-        part.el.addEventListener('button-release', () => this._setButton(part, false));
-      }
-
       if (part.type === 'wokwi-potentiometer' || part.type === 'wokwi-slide-potentiometer') {
         part.el.addEventListener('input', () => this._setPot(part));
-        // Lit uses property, watch for attribute change as fallback
         part.el.addEventListener('pointerup', () => this._setPot(part));
         part.el.addEventListener('pointermove', () => this._setPot(part));
       }
-
-      if (part.type === 'wokwi-slide-switch') {
-        part.el.addEventListener('pointerdown', () => {
-          setTimeout(() => this._setSlideSwitch(part), 0);
-        });
-      }
     }
+  }
+
+  // Called by the canvas when any part is pressed (pointerdown).
+  _onPartPress(part) {
+    if (part.type === 'wokwi-pushbutton' || part.type === 'wokwi-pushbutton-6mm') {
+      part._pressAt = performance.now();
+      if (part._releaseTimer) { clearTimeout(part._releaseTimer); part._releaseTimer = null; }
+      part.el.pressed = true;
+      this._setButton(part, true);
+    } else if (part.type === 'wokwi-slide-switch') {
+      // Toggle position on click
+      part.el.value = part.el.value ? 0 : 1;
+      this._setSlideSwitch(part);
+    }
+  }
+
+  // Called by the canvas when a part is released (pointerup / pointerleave).
+  _onPartRelease(part) {
+    if (part.type !== 'wokwi-pushbutton' && part.type !== 'wokwi-pushbutton-6mm') return;
+    if (!part._pressAt) return;
+    // Guarantee a minimum hold so a fast click still beats the sketch debounce.
+    const MIN_PRESS_MS = 120;
+    const held = performance.now() - part._pressAt;
+    const remaining = Math.max(0, MIN_PRESS_MS - held);
+    if (part._releaseTimer) clearTimeout(part._releaseTimer);
+    part._releaseTimer = setTimeout(() => {
+      part._releaseTimer = null;
+      part._pressAt = 0;
+      part.el.pressed = false;
+      this._setButton(part, false);
+    }, remaining);
   }
 
   _setButton(part, pressed) {
@@ -479,11 +502,38 @@ export class SimulationManager {
     check.warnings.forEach(w => this._appendSerial(`[circuit-ai] ⚠ ${w}\n`));
     this._appendSerial(`[circuit-ai] Done — placed ${count} parts, fully wired. Press ▶ to simulate.\n`);
 
-    // Nets depend on wires, which land next frame; save after that
+    // Nets depend on wires, which land next frame; save + fit view after that
     setTimeout(() => {
       this._rebuildNets();
+      this.canvas.zoomFit();
       this._save();
-    }, 120);
+    }, 150);
+  }
+
+  // Map a compiler "No such file: X.h" error to an installable library name.
+  _detectMissingLibrary(errorText) {
+    const m = /(\w[\w\-.]*\.h):?\s+No such file or directory/i.exec(errorText)
+      || /fatal error:\s*(\w[\w\-.]*\.h)/i.exec(errorText);
+    if (!m) return null;
+    const header = m[1];
+    // Common header → Library Manager name. Falls back to the header stem.
+    const KNOWN = {
+      'Servo.h': 'Servo',
+      'LiquidCrystal.h': 'LiquidCrystal',
+      'LiquidCrystal_I2C.h': 'LiquidCrystal I2C',
+      'Adafruit_GFX.h': 'Adafruit GFX Library',
+      'Adafruit_SSD1306.h': 'Adafruit SSD1306',
+      'DHT.h': 'DHT sensor library',
+      'FastLED.h': 'FastLED',
+      'Adafruit_NeoPixel.h': 'Adafruit NeoPixel',
+      'IRremote.h': 'IRremote',
+      'Wire.h': null,   // bundled with the core, not installable
+      'SPI.h': null,
+      'SoftwareSerial.h': null,
+      'EEPROM.h': null,
+    };
+    if (header in KNOWN) return KNOWN[header];
+    return header.replace(/\.h$/i, '');
   }
 
   // ── Simulation control ───────────────────────────────────────────────────
@@ -507,6 +557,27 @@ export class SimulationManager {
       return;
     }
 
+    // If compilation failed on a missing library header, offer to install it
+    // and retry automatically — the sim shouldn't dead-end on a one-click fix.
+    if (!result.success) {
+      const lib = this._detectMissingLibrary(result.error || '');
+      if (lib) {
+        this._appendSerial(`[simulator] Missing library "${lib}". Installing…\n`);
+        this._setFabState('compiling');
+        try {
+          const inst = await window.electronAPI.lib.install(lib);
+          if (inst && inst.success !== false) {
+            this._appendSerial(`[simulator] Installed ${lib}. Recompiling…\n`);
+            result = await window.electronAPI.arduino.compileHex(sketchPath, 'arduino:avr:uno');
+          } else {
+            this._appendSerial(`[simulator] Could not install ${lib}: ${inst?.error || 'unknown error'}\n`);
+          }
+        } catch (err) {
+          this._appendSerial(`[simulator] Library install failed: ${err.message}\n`);
+        }
+      }
+    }
+
     if (!result.success) {
       this._appendSerial('[simulator] Compilation error:\n');
       this._appendSerial((result.error || 'unknown error') + '\n');
@@ -519,6 +590,7 @@ export class SimulationManager {
         div.textContent = result.error || 'Compilation failed';
         consoleEl.appendChild(div);
       }
+      document.querySelector('.output-tab[data-tab="console"]')?.click();
       return;
     }
 

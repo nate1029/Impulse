@@ -191,6 +191,17 @@
   animation: sim-spin 1.2s linear infinite;
   pointer-events: none;
 }
+.sim-fab-agent { background: #00897b; }
+.sim-fab-agent:hover { background: #00796b; }
+.sim-fab-agent.working {
+  background: #26a69a;
+  animation: sim-agent-pulse 1s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes sim-agent-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(38,166,154,0.6); }
+  50% { box-shadow: 0 0 0 8px rgba(38,166,154,0); }
+}
 
 @keyframes sim-spin {
   from { transform: rotate(0deg); }

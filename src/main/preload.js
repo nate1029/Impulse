@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setProvider: (providerName, apiKey, model) => ipcRenderer.invoke('ai:set-provider', providerName, apiKey, model),
     processQuery: (query, context, mode) => ipcRenderer.invoke('ai:process-query', query, context, mode),
     generateCircuit: (sketchCode) => ipcRenderer.invoke('ai:generate-circuit', sketchCode),
+    verifyExecution: (obs) => ipcRenderer.invoke('ai:verify-execution', obs),
     setModel: (modelId, manual) => ipcRenderer.invoke('ai:set-model', modelId, manual),
     getModelSuggestion: () => ipcRenderer.invoke('ai:get-model-suggestion'),
     pinModel: (modelId) => ipcRenderer.invoke('ai:pin-model', modelId),

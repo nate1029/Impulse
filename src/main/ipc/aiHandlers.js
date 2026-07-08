@@ -5,6 +5,7 @@
 
 const AIAgent = require('../services/ai/agent');
 const { generateCircuit } = require('../services/ai/circuitGenerator');
+const { verifyExecution } = require('../services/ai/agentVerify');
 const { parseOrDefault, schemas } = require('./schemas');
 const { withDebugLog } = require('../utils/logger');
 
@@ -44,6 +45,17 @@ function register(ipcMain, ctx) {
       return await generateCircuit(aiAgent, sketchCode);
     } catch (error) {
       return { success: false, error: error?.message ?? 'Circuit generation failed' };
+    }
+  }));
+
+  ipcMain.handle('ai:verify-execution', withDebugLog('ai:verify-execution', async (event, obs) => {
+    if (!obs || typeof obs !== 'object' || typeof obs.code !== 'string' || obs.code.length > 200000) {
+      return { success: false, error: 'Invalid observation payload' };
+    }
+    try {
+      return await verifyExecution(aiAgent, obs);
+    } catch (error) {
+      return { success: false, error: error?.message ?? 'Verify failed' };
     }
   }));
 

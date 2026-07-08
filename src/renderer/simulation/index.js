@@ -18,6 +18,9 @@ export class SimulationManager {
     this._servoState = {};    // partId → { lastRise, pin }
     this._serialBuffer = '';
     this._statsTimer = null;
+    this._captureBuf = '';    // rolling serial capture for the agent loop
+    this._pinActivity = {};   // arduinoPin → toggle count (for the agent loop)
+    this._agentRunning = false;
 
     this._buildUI();
     this._bindRunner();
@@ -52,6 +55,15 @@ export class SimulationManager {
               <path d="M12 2l1.7 5.2L19 9l-5.3 1.8L12 16l-1.7-5.2L5 9l5.3-1.8L12 2z"/>
               <path d="M19 14l.9 2.6L22.5 18l-2.6.9L19 21.5l-.9-2.6L15.5 18l2.6-.9L19 14z" opacity="0.8"/>
               <path d="M5 15l.7 2L7.5 18l-1.8.7L5 20.5l-.7-1.8L2.5 18l1.8-1L5 15z" opacity="0.6"/>
+            </svg>
+          </button>
+          <button class="sim-fab sim-fab-agent" id="simAgentBtn" title="Run AI agent: build, simulate, observe & fix">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="8" width="16" height="12" rx="2"/>
+              <path d="M12 8V4M9 4h6"/>
+              <circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none"/>
+              <circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none"/>
+              <path d="M2 13v3M22 13v3"/>
             </svg>
           </button>
           <button class="sim-fab sim-fab-menu" id="simMenuBtn" title="More options">
@@ -116,6 +128,7 @@ export class SimulationManager {
     document.getElementById('simPauseBtn').addEventListener('click', () => this.togglePause());
     document.getElementById('simAddBtn').addEventListener('click', () => this._togglePicker());
     document.getElementById('simAiBtn').addEventListener('click', () => this.buildCircuitFromCode());
+    document.getElementById('simAgentBtn').addEventListener('click', () => this.runAgent());
     document.getElementById('simMenuBtn').addEventListener('click', () => this._toggleMenu());
     document.getElementById('simMenuClear').addEventListener('click', () => {
       this._toggleMenu(false);
@@ -302,6 +315,9 @@ export class SimulationManager {
   // ── Pin change → component visuals ───────────────────────────────────────
 
   _onPinChange(arduinoPin, high, cycles) {
+    // Record activity for the agent loop (count edges per pin)
+    this._pinActivity[arduinoPin] = (this._pinActivity[arduinoPin] || 0) + 1;
+
     // UNO built-in LED
     const uno = this.canvas?.parts.find(p => p.type === 'wokwi-arduino-uno');
     if (uno && arduinoPin === 13) uno.el.led13 = high;
@@ -508,6 +524,149 @@ export class SimulationManager {
       this.canvas.zoomFit();
       this._save();
     }, 150);
+  }
+
+  // ── Agentic loop: build → simulate → observe → fix ────────────────────────
+
+  async runAgent() {
+    if (this._agentRunning) return;
+    const sketchPath = window.state?.currentFile;
+    if (!sketchPath) {
+      this._agentLog('Save your sketch first (Ctrl+S), then run the agent.');
+      return;
+    }
+    const btn = document.getElementById('simAgentBtn');
+    this._agentRunning = true;
+    btn?.classList.add('working');
+    this.stop();
+
+    const MAX_ITERS = 4;
+    try {
+      // Ensure a circuit exists before we start observing behavior.
+      if (!this._hasBoard()) {
+        this._agentLog('No circuit yet — generating one from your code…');
+        await this.buildCircuitFromCode();
+        await this._delay(300);
+      }
+
+      for (let iter = 1; iter <= MAX_ITERS; iter++) {
+        this._agentLog(`── Iteration ${iter}/${MAX_ITERS} ──`);
+        let code = window.state?.editor?.getValue?.() || '';
+
+        // 1) Compile (auto-installing a missing library if that's the blocker)
+        this._agentLog('Compiling…');
+        let comp = await window.electronAPI.arduino.compileHex(sketchPath, 'arduino:avr:uno');
+        if (!comp.success) {
+          const lib = this._detectMissingLibrary(comp.error || '');
+          if (lib) {
+            this._agentLog(`Installing missing library "${lib}"…`);
+            await window.electronAPI.lib.install(lib).catch(() => {});
+            comp = await window.electronAPI.arduino.compileHex(sketchPath, 'arduino:avr:uno');
+          }
+        }
+
+        // 2) Compile still failing → ask the model to fix the code
+        if (!comp.success) {
+          this._agentLog('Compile failed — asking AI to fix the code…');
+          const fixed = await this._verify({ code, compile: comp.error || 'compile error', serial: '', pins: '', runSeconds: 0 });
+          if (fixed && fixed.fixedCode) {
+            await this._applyCode(sketchPath, fixed.fixedCode);
+            this._agentLog(`Applied fix: ${fixed.summary || 'code updated'}`);
+            continue; // recompile next iteration
+          }
+          this._agentLog('Could not auto-fix the compile error. Stopping.');
+          return;
+        }
+
+        // 3) Run the compiled program and observe real behavior
+        this._agentLog('Compiled ✓  Running simulation to observe behavior…');
+        if (!this.runner.load(comp.hex)) { this._agentLog('Failed to load program.'); return; }
+        this._rebuildNets();
+        const obs = await this._captureRun(3);
+        this._agentLog(`Observed: pins → ${obs.pins}`);
+        const firstLine = (obs.serial.split('\n').find(l => l.trim()) || '(no serial output)').slice(0, 80);
+        this._agentLog(`Serial → ${firstLine}${obs.serial.length > 80 ? ' …' : ''}`);
+
+        // 4) Verify behavior against intent
+        this._agentLog('Verifying behavior with AI…');
+        const verdict = await this._verify({ code, compile: 'ok', serial: obs.serial, pins: obs.pins, runSeconds: 3 });
+        if (!verdict) { this._agentLog('Verification unavailable. Stopping.'); return; }
+
+        if (verdict.status === 'pass') {
+          this._agentLog(`✓ PASS — ${verdict.summary || 'behaves as intended.'}`);
+          this._agentLog('Agent finished. The circuit is live; press ▶ to keep running.');
+          return;
+        }
+
+        // 5) Failed — report and, if offered, apply the fix and loop
+        this._agentLog(`✗ Issue — ${verdict.summary || 'behavior does not match intent.'}`);
+        (verdict.issues || []).forEach(i => this._agentLog(`   • ${i}`));
+        if (verdict.fixedCode && iter < MAX_ITERS) {
+          await this._applyCode(sketchPath, verdict.fixedCode);
+          this._agentLog('Applied fix, re-verifying…');
+          continue;
+        }
+        this._agentLog(verdict.fixedCode ? 'Reached iteration limit.' : 'No automatic fix available. Stopping.');
+        return;
+      }
+    } catch (err) {
+      this._agentLog(`Agent error: ${err.message}`);
+    } finally {
+      this._agentRunning = false;
+      btn?.classList.remove('working');
+    }
+  }
+
+  // Run the loaded program for `seconds`, capturing serial + pin activity.
+  async _captureRun(seconds) {
+    this._captureBuf = '';
+    this._pinActivity = {};
+    this._capturing = true;
+    this._attachInputHandlers();
+    this._initInputLevels();
+    this.runner.start();
+    this.running = true;
+    this._setFabState('running');
+    this._startStats();
+    await this._delay(seconds * 1000);
+    this.runner.stop();
+    this.running = false;
+    this._capturing = false;
+    this._stopStats();
+    this._setFabState('idle');
+    return { serial: this._captureBuf, pins: this._summarizePins() };
+  }
+
+  async _verify(obs) {
+    try {
+      const res = await window.electronAPI.ai.verifyExecution(obs);
+      if (!res || !res.success) {
+        this._agentLog(`Verify error: ${res?.error || 'unknown'}`);
+        return null;
+      }
+      return res;
+    } catch (err) {
+      this._agentLog(`Verify error: ${err.message}`);
+      return null;
+    }
+  }
+
+  async _applyCode(sketchPath, code) {
+    if (window.state?.editor) window.state.editor.setValue(code);
+    // Keep the open-file tab's cached content in sync so a later save isn't stale
+    const tab = (window.state?.openFiles || []).find(f => f.path === sketchPath);
+    if (tab) tab.content = code;
+    try { await window.electronAPI.file.save(sketchPath, code); } catch (_) {}
+  }
+
+  _hasBoard() {
+    return !!this.canvas?.parts.find(p => p.type === 'wokwi-arduino-uno');
+  }
+
+  _delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  _agentLog(msg) {
+    this._appendSerial(`[agent] ${msg}\n`);
   }
 
   // Map a compiler "No such file: X.h" error to an installable library name.
@@ -726,6 +885,11 @@ export class SimulationManager {
   // ── Serial ───────────────────────────────────────────────────────────────
 
   _appendSerial(text) {
+    // Capture sketch serial (not agent/simulator log lines) for the agent loop
+    if (this._capturing && !text.startsWith('[')) {
+      this._captureBuf += text;
+      if (this._captureBuf.length > 8000) this._captureBuf = this._captureBuf.slice(-8000);
+    }
     const el = document.getElementById('simSerialOut');
     if (!el) return;
     el.textContent += text;
@@ -738,6 +902,18 @@ export class SimulationManager {
       clearTimeout(this._txTimer);
       this._txTimer = setTimeout(() => { uno.el.ledTX = false; }, 80);
     }
+  }
+
+  // Human-readable pin-activity summary for the verify step.
+  _summarizePins() {
+    const entries = Object.entries(this._pinActivity)
+      .map(([p, n]) => [Number(p), n])
+      .sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return 'no digital pin activity observed';
+    return entries.map(([pin, n]) => {
+      const label = pin >= 14 ? `A${pin - 14}` : `D${pin}`;
+      return `${label}:${n} edges`;
+    }).join(', ');
   }
 
   _clearSerial() {

@@ -6,6 +6,8 @@
 const AIAgent = require('../services/ai/agent');
 const { parseOrDefault, schemas } = require('./schemas');
 const { withDebugLog } = require('../utils/logger');
+const { recordFeedback } = require('../services/ai/feedback');
+const pendingEdits = require('../services/ai/pendingEdits');
 
 const defaultFail = { success: false, error: 'Invalid input' };
 
@@ -16,6 +18,15 @@ const defaultFail = { success: false, error: 'Invalid input' };
  */
 function register(ipcMain, ctx) {
   const { aiAgent, apiKeyManager, uiState } = ctx;
+
+  // One agent turn at a time: aiAgent shares a single conversationHistory,
+  // _cancelled flag and stream callbacks, so concurrent turns corrupt each other.
+  let turnRunning = false;
+  const runExclusive = async (work) => {
+    if (turnRunning) return { success: false, error: 'The agent is already working on a request. Stop it or wait for it to finish.' };
+    turnRunning = true;
+    try { return await work(); } finally { turnRunning = false; }
+  };
 
   ipcMain.handle('ai:set-provider', withDebugLog('ai:set-provider', async (event, providerName, apiKey, model) => {
     const parsed = parseOrDefault(schemas.aiSetProvider, { providerName: providerName ?? '', apiKey: apiKey ?? null, model: model ?? null }, defaultFail);
@@ -35,11 +46,24 @@ function register(ipcMain, ctx) {
     }
   }));
 
-  ipcMain.handle('ai:process-query', withDebugLog('ai:process-query', async (event, query, context, mode) => {
+  ipcMain.handle('ai:process-query', withDebugLog('ai:process-query', async (event, query, context, mode, attachments) => {
     const parsed = parseOrDefault(schemas.aiProcessQuery, { query: query ?? '', context: context ?? {}, mode: mode ?? 'agent' }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;
+    return runExclusive(async () => {
     try {
       const ctx = parsed.data.context || {};
+      // Flow awareness: pull the last ~10 serial lines from the tool executor's
+      // buffer so the agent sees what the board is currently saying without
+      // having to ask. ponytail: 10 lines is enough for most debugging; bump if
+      // agents keep calling read_serial straight after being invoked.
+      let recentSerial = '';
+      try {
+        const buf = aiAgent?.toolExecutor?.serialBuffer;
+        if (Array.isArray(buf) && buf.length > 0) {
+          recentSerial = buf.slice(-10).map(e => String(e.data || '')).join('').trim().slice(-1500);
+        }
+      } catch (_) { /* buffer optional */ }
+
       const enrichedContext = {
         ...parsed.data.context,
         currentBaudRate: uiState.currentBaudRate,
@@ -47,36 +71,53 @@ function register(ipcMain, ctx) {
         selectedBoard: uiState.selectedBoard ?? ctx.board ?? null,
         selectedPort: uiState.selectedPort ?? ctx.port ?? null,
         hasFileOpen: ctx.hasFileOpen ?? false,
-        lastCompileResult: uiState.lastCompileResult ?? null
+        lastCompileResult: uiState.lastCompileResult ?? null,
+        workspaceRoot: uiState.workspaceRoot ?? null,
+        autoVerify: !!ctx.autoVerify,
+        editorSelection: typeof ctx.editorSelection === 'string' && ctx.editorSelection.length > 0
+          ? ctx.editorSelection.slice(0, 2000) : null,
+        recentSerial: recentSerial || null
       };
       const effectiveMode = parsed.data.mode === 'ask' || parsed.data.mode === 'debug' ? parsed.data.mode : 'agent';
-      const result = await aiAgent.processQuery(parsed.data.query, enrichedContext, effectiveMode);
+      // ponytail: shallow validate attachments here rather than extending the zod schema.
+      // Cap at 4 images, 8 MB each — vision APIs choke past that anyway.
+      const safeAttachments = Array.isArray(attachments)
+        ? attachments
+            .filter(a => a && typeof a.data === 'string' && typeof a.mimeType === 'string' && a.data.length < 8_000_000)
+            .slice(0, 4)
+        : [];
+      const result = await aiAgent.processQuery(parsed.data.query, enrichedContext, effectiveMode, safeAttachments);
       return { success: true, data: result };
     } catch (error) {
       return { success: false, error: error?.message ?? 'Process query failed' };
     }
+    });
   }));
 
   ipcMain.handle('ai:analyze-error', withDebugLog('ai:analyze-error', async (event, errorMessage, context) => {
     const parsed = parseOrDefault(schemas.aiAnalyzeError, { errorMessage: errorMessage ?? '', context }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;
+    return runExclusive(async () => {
     try {
       const result = await aiAgent.analyzeError(parsed.data.errorMessage, parsed.data.context);
       return { success: true, data: result };
     } catch (error) {
       return { success: false, error: error?.message ?? 'Analyze failed' };
     }
+    });
   }));
 
   ipcMain.handle('ai:analyze-serial', withDebugLog('ai:analyze-serial', async (event, serialOutput, lines) => {
     const parsed = parseOrDefault(schemas.aiAnalyzeSerial, { serialOutput: serialOutput ?? '', lines: lines ?? [] }, defaultFail);
     if (!parsed.ok) return parsed.defaultResult;
+    return runExclusive(async () => {
     try {
-      const result = await aiAgent.analyzeSerialOutput(parsed.data.serialOutput, parsed.data.lines);
+      const result = await aiAgent.analyzeSerialOutput(parsed.data.serialOutput);
       return { success: true, data: result };
     } catch (error) {
       return { success: false, error: error?.message ?? 'Analyze failed' };
     }
+    });
   }));
 
   ipcMain.handle('ai:get-providers', withDebugLog('ai:get-providers', async () => {
@@ -160,6 +201,32 @@ function register(ipcMain, ctx) {
     } catch (error) {
       return { success: false, error: error?.message ?? 'Set auto-upgrade failed' };
     }
+  }));
+
+  ipcMain.handle('ai:cancel', withDebugLog('ai:cancel', async () => {
+    try { aiAgent.cancel(); return { success: true }; }
+    catch (error) { return { success: false, error: error?.message ?? 'Cancel failed' }; }
+  }));
+
+  ipcMain.on('ai:pending-edit-decide', (event, msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    pendingEdits.decide(String(msg.id), !!msg.accepted);
+  });
+
+  ipcMain.handle('ai:record-feedback', withDebugLog('ai:record-feedback', async (event, entry) => {
+    try {
+      if (!entry || typeof entry !== 'object') return { success: false, error: 'Invalid entry' };
+      const rating = entry.rating === 'up' || entry.rating === 'down' ? entry.rating : null;
+      if (!rating) return { success: false, error: 'Rating must be up or down' };
+      return recordFeedback({
+        rating,
+        prompt: String(entry.prompt || '').slice(0, 4000),
+        response: String(entry.response || '').slice(0, 8000),
+        model: entry.model || null,
+        tools: Array.isArray(entry.tools) ? entry.tools.slice(0, 20) : [],
+        board: entry.board || null
+      });
+    } catch (error) { return { success: false, error: error?.message ?? 'Feedback failed' }; }
   }));
 
   ipcMain.handle('ai:summarize-history', withDebugLog('ai:summarize-history', async () => {

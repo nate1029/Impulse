@@ -22,8 +22,6 @@ window.CodeMirror = CodeMirror;
 
 // --- Application scripts (side-effect imports) ---
 import './notifications.js';
-import './tooltips.js';
 import './validation.js';
-import './onboarding.js';
 import './accessibility.js';
 import './renderer.js';

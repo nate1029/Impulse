@@ -15,18 +15,13 @@ class GeminiProvider extends BaseProvider {
     this.genAI = new GoogleGenerativeAI(this.apiKey);
   }
 
+  // Curated to agent-capable models. "-lite" tiers and the 1.5 legacy family
+  // were removed — too weak to reliably finish multi-step builds.
   getAvailableModels() {
     return [
-      // Gemini 2.5 family (2025)
       'gemini-2.5-pro',
       'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      // Gemini 2.0 family
-      'gemini-2.0-flash',
-      'gemini-2.0-flash-lite',
-      // Gemini 1.5 family (legacy)
-      'gemini-1.5-pro',
-      'gemini-1.5-flash',
+      'gemini-2.0-flash'
     ];
   }
 
@@ -43,48 +38,44 @@ class GeminiProvider extends BaseProvider {
     }));
   }
 
-  async chat(messages, options = {}) {
+  _prepareRequest(messages, options) {
     const modelName = this.model || GeminiProvider.DEFAULT_MODEL;
-    
+    const modelConfig = {
+      model: modelName,
+      generationConfig: {
+        temperature: options.temperature || 0.7,
+        maxOutputTokens: options.max_tokens || 8192
+      }
+    };
+    if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+      modelConfig.tools = [{ functionDeclarations: this.formatTools(options.tools) }];
+    }
+    const model = this.genAI.getGenerativeModel(modelConfig);
+    const { systemInstruction, contents } = this.convertMessagesToGemini(messages);
+    return { model, modelName, request: { contents, systemInstruction: systemInstruction || undefined } };
+  }
+
+  _handleGeminiError(error, modelName) {
+    console.error('Gemini API error:', error);
+    if (error.message?.includes('API key')) {
+      throw new Error('Invalid Gemini API key. Get one from https://aistudio.google.com/apikey');
+    }
+    if (error.message?.includes('not found') || error.message?.includes('404')) {
+      throw new Error(`Model "${modelName}" not available. Try updating @google/generative-ai package or use a different model.`);
+    }
+    if (error.message?.includes('quota') || error.message?.includes('rate')) {
+      throw new Error('API quota exceeded. Please wait and try again.');
+    }
+    throw new Error(`Gemini error: ${error.message}`);
+  }
+
+  async chat(messages, options = {}) {
+    const { model, modelName, request } = this._prepareRequest(messages, options);
     try {
-      // Build model config
-      const modelConfig = { 
-        model: modelName,
-        generationConfig: {
-          temperature: options.temperature || 0.7,
-          maxOutputTokens: options.max_tokens || 2000,
-        }
-      };
-
-      // Wire up tools if provided
-      if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
-        modelConfig.tools = [{
-          functionDeclarations: this.formatTools(options.tools)
-        }];
-      }
-
-      // Get the model - newer SDK handles API version automatically
-      const model = this.genAI.getGenerativeModel(modelConfig);
-
-      // Convert messages to Gemini format
-      const { systemInstruction, contents } = this.convertMessagesToGemini(messages);
-
-      // Generate content
-      const result = await model.generateContent({
-        contents: contents,
-        systemInstruction: systemInstruction || undefined,
-      });
-
+      const result = await model.generateContent(request);
       const response = result.response;
-      
-      // response.text() throws if the response only contains function calls
       let text = '';
-      try {
-        text = response.text();
-      } catch (_) {
-        // No text content (function-call-only response)
-      }
-
+      try { text = response.text(); } catch (_) { /* function-call-only */ }
       return {
         content: text || '',
         toolCalls: this.parseToolCalls(response),
@@ -94,24 +85,33 @@ class GeminiProvider extends BaseProvider {
         },
         model: modelName
       };
-    } catch (error) {
-      console.error('Gemini API error:', error);
-      
-      // Handle specific errors
-      if (error.message?.includes('API key')) {
-        throw new Error('Invalid Gemini API key. Get one from https://aistudio.google.com/apikey');
-      }
-      
-      if (error.message?.includes('not found') || error.message?.includes('404')) {
-        throw new Error(`Model "${modelName}" not available. Try updating @google/generative-ai package or use a different model.`);
-      }
+    } catch (error) { this._handleGeminiError(error, modelName); }
+  }
 
-      if (error.message?.includes('quota') || error.message?.includes('rate')) {
-        throw new Error('API quota exceeded. Please wait and try again.');
+  async chatStream(messages, options = {}, onDelta) {
+    const { model, modelName, request } = this._prepareRequest(messages, options);
+    try {
+      const result = await model.generateContentStream(request);
+      let content = '';
+      for await (const chunk of result.stream) {
+        let text = '';
+        try { text = chunk.text?.() || ''; } catch (_) { /* function-call chunk */ }
+        if (text) {
+          content += text;
+          if (typeof onDelta === 'function') { try { onDelta({ text }); } catch (_) { /* UI-only */ } }
+        }
       }
-      
-      throw new Error(`Gemini error: ${error.message}`);
-    }
+      const response = await result.response;
+      return {
+        content,
+        toolCalls: this.parseToolCalls(response),
+        usage: {
+          promptTokens: response.usageMetadata?.promptTokenCount || 0,
+          completionTokens: response.usageMetadata?.candidatesTokenCount || 0
+        },
+        model: modelName
+      };
+    } catch (error) { this._handleGeminiError(error, modelName); }
   }
 
   convertMessagesToGemini(messages) {
@@ -163,8 +163,13 @@ class GeminiProvider extends BaseProvider {
         continue;
       }
 
-      // User messages
-      if (msg.content) {
+      // User messages — plain string or canonical multi-modal blocks
+      if (Array.isArray(msg.content)) {
+        const parts = msg.content.map(p => p.type === 'image'
+          ? { inline_data: { mime_type: p.mimeType, data: p.data } }
+          : { text: p.text || '' });
+        contents.push({ role: 'user', parts });
+      } else if (msg.content) {
         contents.push({
           role: 'user',
           parts: [{ text: msg.content }]

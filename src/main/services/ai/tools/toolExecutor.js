@@ -1,4 +1,5 @@
 const { validateToolCall } = require('./toolSchema');
+const { webSearch, fetchUrl } = require('./webResearch');
 
 /**
  * Tool Executor
@@ -6,11 +7,12 @@ const { validateToolCall } = require('./toolSchema');
  * Routes to appropriate service handlers
  */
 class ToolExecutor {
-  constructor(arduinoService, serialMonitor, errorMemory, aiMemory) {
+  constructor(arduinoService, serialMonitor, errorMemory, aiMemory, workspaceService = null) {
     this.arduinoService = arduinoService;
     this.serialMonitor = serialMonitor;
     this.errorMemory = errorMemory;
     this.aiMemory = aiMemory;
+    this.workspaceService = workspaceService;
     this.serialBuffer = []; // Buffer for serial output
     this.maxBufferSize = 1000; // Maximum lines to buffer
 
@@ -75,6 +77,15 @@ class ToolExecutor {
         case 'send_serial':
           result = await this.executeSendSerial(toolCall.arguments);
           break;
+        case 'verify_serial':
+          result = await this.executeVerifySerial(toolCall.arguments);
+          break;
+        case 'web_search':
+          result = await this.executeWebSearch(toolCall.arguments);
+          break;
+        case 'fetch_url':
+          result = await this.executeFetchUrl(toolCall.arguments);
+          break;
         case 'read_serial':
           result = await this.executeReadSerial(toolCall.arguments);
           break;
@@ -137,6 +148,51 @@ class ToolExecutor {
           result = await this.executeUpdatePlayground(toolCall.arguments);
           break;
 
+        // Workspace / filesystem Operations
+        case 'read_file':
+          result = await this.executeReadFile(toolCall.arguments);
+          break;
+        case 'write_file':
+          result = await this.executeWriteFile(toolCall.arguments);
+          break;
+        case 'create_file':
+          result = await this.executeCreateFile(toolCall.arguments);
+          break;
+        case 'list_directory':
+          result = await this.executeListDirectory(toolCall.arguments);
+          break;
+        case 'get_project_tree':
+          result = await this.executeGetProjectTree(toolCall.arguments);
+          break;
+        case 'search_files':
+          result = await this.executeSearchFiles(toolCall.arguments);
+          break;
+
+        // Library management
+        case 'search_libraries':
+          result = await this.executeSearchLibraries(toolCall.arguments);
+          break;
+        case 'install_library':
+          result = await this.executeInstallLibrary(toolCall.arguments);
+          break;
+        case 'list_libraries':
+          result = await this.executeListLibraries();
+          break;
+        case 'uninstall_library':
+          result = await this.executeUninstallLibrary(toolCall.arguments);
+          break;
+
+        // Board core management
+        case 'search_board_cores':
+          result = await this.executeSearchBoardCores(toolCall.arguments);
+          break;
+        case 'install_board_core':
+          result = await this.executeInstallBoardCore(toolCall.arguments);
+          break;
+        case 'list_board_cores':
+          result = await this.executeListBoardCores();
+          break;
+
         default:
           return {
             success: false,
@@ -153,10 +209,15 @@ class ToolExecutor {
         );
       }
 
+      // Propagate an executor's internal failure to the wrapper so the agent
+      // (and its critic / tool-log) can actually SEE a tool that failed without
+      // throwing — e.g. an out-of-range edit or a failed library install.
+      const innerFailed = result && typeof result === 'object' && result.success === false;
       return {
-        success: true,
+        success: !innerFailed,
         tool: toolCall.name,
-        result: result
+        result: result,
+        ...(innerFailed && result.error ? { error: result.error } : {})
       };
     } catch (error) {
       return {
@@ -193,17 +254,26 @@ class ToolExecutor {
     }
     try {
       const compileResult = await this.arduinoService.compile(sketchPath, boardFQBN);
+      // Success: the full --verbose build log is tens of thousands of tokens of
+      // noise the model doesn't need. Send a compact summary instead.
       return {
-        output: compileResult.output,
-        warnings: compileResult.warnings || [],
         success: true,
-        message: compileResult.message
+        message: compileResult.message || 'Compilation succeeded',
+        warnings: (compileResult.warnings || []).slice(0, 20),
+        programSize: compileResult.programSize,
+        usagePercent: compileResult.usagePercent
       };
     } catch (err) {
+      // Failure: the model MUST see the real errors to fix them. arduino-cli
+      // puts them on err.errors (parsed) and err.output (raw) — the old code
+      // read err.stdout/err.stderr, which don't exist, so the agent was blind.
+      const raw = String(err.output || err.stderr || err.stdout || '');
+      const tail = raw.length > 6000 ? '…(truncated)\n' + raw.slice(-6000) : raw;
       return {
         success: false,
-        error: err.message,
-        output: err.stdout || err.stderr
+        error: err.message || 'Compilation failed',
+        errors: Array.isArray(err.errors) ? err.errors.slice(0, 40) : undefined,
+        output: tail
       };
     }
   }
@@ -311,6 +381,64 @@ class ToolExecutor {
     };
   }
 
+  async executeWebSearch(args) {
+    const apiKey = this.uiCallbacks?.getApiKey ? this.uiCallbacks.getApiKey('tavily') : null;
+    return webSearch({
+      query: args?.query,
+      limit: args?.limit,
+      apiKey
+    });
+  }
+
+  async executeFetchUrl(args) {
+    return fetchUrl({ url: args?.url });
+  }
+
+  // A17 — verify-on-hardware. Wait for `expected` to appear in serial output
+  // within `timeoutMs`. Requires an active serial connection.
+  async executeVerifySerial(args) {
+    const { expected, timeoutMs = 8000, isRegex = false } = args;
+    if (!expected || typeof expected !== 'string') {
+      return { success: false, error: 'expected pattern required' };
+    }
+    if (!this.serialMonitor.isConnectedStatus()) {
+      return { success: false, error: 'Serial monitor not connected. Call connect_serial first.' };
+    }
+    // Cap timeout so a misbehaving pattern can't hang the agent turn.
+    const cap = Math.min(Math.max(500, timeoutMs), 30000);
+    let matcher;
+    try {
+      matcher = isRegex ? new RegExp(expected) : null;
+    } catch (e) { return { success: false, error: `invalid regex: ${e.message}` }; }
+
+    const baseline = this.serialBuffer.length;
+    const start = Date.now();
+    const test = (line) => matcher ? matcher.test(line) : line.includes(expected);
+
+    return new Promise((resolve) => {
+      const done = (passed, matchedLine) => {
+        clearInterval(iv);
+        const sampled = this.serialBuffer.slice(baseline).map(e => e.data);
+        resolve({
+          success: true,
+          passed,
+          matchedLine: matchedLine || null,
+          elapsedMs: Date.now() - start,
+          sampledLines: sampled.slice(-20)
+        });
+      };
+      const iv = setInterval(() => {
+        for (let i = baseline; i < this.serialBuffer.length; i++) {
+          const chunk = String(this.serialBuffer[i].data || '');
+          for (const line of chunk.split(/\r?\n/)) {
+            if (line && test(line)) return done(true, line);
+          }
+        }
+        if (Date.now() - start >= cap) return done(false, null);
+      }, 100);
+    });
+  }
+
   async executeAutoDetectBaud(args) {
     const { port } = args;
 
@@ -401,24 +529,45 @@ class ToolExecutor {
 
     const currentCode = await this.uiCallbacks.getEditorCode();
     const lines = currentCode.split('\n');
+    const L = lines.length;
+
+    // Validate line numbers BEFORE touching the buffer. A hallucinated or
+    // off-by-one line number must fail loudly, never silently mangle the file.
+    const s = Number(startLine);
+    if (!Number.isInteger(s) || s < 1) {
+      return { success: false, error: `Invalid startLine ${startLine}: must be a positive integer (file has ${L} lines).` };
+    }
+    const hasEnd = endLine !== undefined && endLine !== null;
+    const e = hasEnd ? Number(endLine) : s;
+    if (hasEnd && (!Number.isInteger(e) || e < s)) {
+      return { success: false, error: `Invalid range: endLine ${endLine} must be an integer >= startLine ${startLine}.` };
+    }
+    // insert may target one past the last line (append); replace/delete may not.
+    const maxStart = operation === 'insert' ? L + 1 : L;
+    if (s > maxStart) {
+      return { success: false, error: `startLine ${s} is past the end of the file (${L} lines).` };
+    }
+    if ((operation === 'replace' || operation === 'delete') && e > L) {
+      return { success: false, error: `endLine ${e} is past the end of the file (${L} lines).` };
+    }
 
     // Convert to 0-indexed
-    const start = startLine - 1;
-    const end = endLine ? endLine - 1 : start;
+    const start = s - 1;
+    const end = e - 1;
 
     let newLines;
 
     switch (operation) {
-      case 'replace':
+      case 'replace': {
         const codeLines = newCode ? newCode.split('\n') : [];
         newLines = [...lines.slice(0, start), ...codeLines, ...lines.slice(end + 1)];
         break;
-
-      case 'insert':
+      }
+      case 'insert': {
         const insertLines = newCode ? newCode.split('\n') : [];
         newLines = [...lines.slice(0, start), ...insertLines, ...lines.slice(start)];
         break;
-
+      }
       case 'delete':
         newLines = [...lines.slice(0, start), ...lines.slice(end + 1)];
         break;
@@ -644,6 +793,146 @@ class ToolExecutor {
 
   clearBuffer() {
     this.serialBuffer = [];
+  }
+
+  // Workspace / filesystem Methods
+  _ws() {
+    if (!this.workspaceService || !this.workspaceService.hasRoot()) {
+      throw new Error('No workspace folder is open. Ask the user to open a project folder first.');
+    }
+    return this.workspaceService;
+  }
+
+  async executeReadFile(args) {
+    const { path: p } = args || {};
+    const r = await this._ws().readFile(p);
+    return { success: true, tool: 'read_file', path: r.path, content: r.content, bytes: r.bytes };
+  }
+
+  // Route agent-authored file writes through the pending-edit review modal.
+  // Reads current content (empty if the file doesn't exist), asks the user,
+  // throws USER_REJECTED on reject — the outer try/catch turns that into a
+  // tool failure the agent can react to.
+  async _reviewFileEdit(relPath, after) {
+    let before = '';
+    try { before = (await this._ws().readFile(relPath)).content || ''; }
+    catch (_) { /* new file, empty baseline */ }
+    if (before === after) return; // no-op, don't prompt
+    if (this.uiCallbacks && this.uiCallbacks.reviewFileWrite) {
+      const ok = await this.uiCallbacks.reviewFileWrite(before, after, relPath);
+      if (!ok) {
+        const err = new Error('User rejected the proposed file write');
+        err.code = 'USER_REJECTED';
+        throw err;
+      }
+    }
+  }
+
+  async executeWriteFile(args) {
+    const { path: p, content } = args || {};
+    await this._reviewFileEdit(p, content ?? '');
+    const r = await this._ws().writeFile(p, content ?? '');
+    if (this.uiCallbacks && this.uiCallbacks.onFileWritten) {
+      try { await this.uiCallbacks.onFileWritten(r.path, r.absPath, content ?? ''); } catch (_) { /* UI-only */ }
+    }
+    return { success: true, tool: 'write_file', path: r.path, bytes: r.bytes };
+  }
+
+  async executeCreateFile(args) {
+    const { path: p, content } = args || {};
+    await this._reviewFileEdit(p, content ?? '');
+    const r = await this._ws().createFile(p, content ?? '');
+    if (this.uiCallbacks && this.uiCallbacks.onFileWritten) {
+      try { await this.uiCallbacks.onFileWritten(r.path, r.absPath, content ?? ''); } catch (_) { /* UI-only */ }
+    }
+    return { success: true, tool: 'create_file', path: r.path, bytes: r.bytes };
+  }
+
+  async executeListDirectory(args) {
+    const { path: p } = args || {};
+    const entries = await this._ws().listDirectory(p || '.');
+    return { success: true, tool: 'list_directory', entries };
+  }
+
+  async executeGetProjectTree(args) {
+    const { maxDepth } = args || {};
+    const tree = await this._ws().getTree(typeof maxDepth === 'number' ? maxDepth : 3);
+    return { success: true, tool: 'get_project_tree', tree };
+  }
+
+  async executeSearchFiles(args) {
+    const { query, isRegex } = args || {};
+    const results = await this._ws().searchFiles(query, { isRegex: !!isRegex });
+    return { success: true, tool: 'search_files', count: results.length, results };
+  }
+
+  // Library management — delegate to arduinoService (arduino-cli under the hood)
+  _arduino() {
+    if (!this.arduinoService) throw new Error('Arduino CLI service is not available.');
+    return this.arduinoService;
+  }
+
+  async executeSearchLibraries(args = {}) {
+    const query = String(args.query || '').trim();
+    if (!query) return { success: false, error: 'A search query is required.' };
+    const data = await this._arduino().libSearch(query);
+    // Trim to the fields the model needs; cap so a broad query doesn't flood context.
+    const libraries = (data.libraries || []).slice(0, 25).map(l => ({
+      name: l.name, author: l.author, version: l.version, description: l.sentence
+    }));
+    return { success: true, tool: 'search_libraries', count: libraries.length, libraries };
+  }
+
+  async executeInstallLibrary(args = {}) {
+    const name = String(args.name || '').trim();
+    if (!name) return { success: false, error: 'A library name is required.' };
+    try {
+      const r = await this._arduino().libInstall(name);
+      return { success: true, tool: 'install_library', name, output: r.output };
+    } catch (err) {
+      return { success: false, tool: 'install_library', name, error: err.message };
+    }
+  }
+
+  async executeListLibraries() {
+    const data = await this._arduino().libList();
+    const installed = (data.installed_libraries || []).map(l => ({ name: l.name, version: l.version }));
+    return { success: true, tool: 'list_libraries', count: installed.length, installed };
+  }
+
+  async executeUninstallLibrary(args = {}) {
+    const name = String(args.name || '').trim();
+    if (!name) return { success: false, error: 'A library name is required.' };
+    try {
+      await this._arduino().libUninstall(name);
+      return { success: true, tool: 'uninstall_library', name };
+    } catch (err) {
+      return { success: false, tool: 'uninstall_library', name, error: err.message };
+    }
+  }
+
+  // Board core management — delegate to arduinoService (arduino-cli core ...)
+  async executeSearchBoardCores(args = {}) {
+    const query = String(args.query || '').trim();
+    if (!query) return { success: false, error: 'A search query is required.' };
+    const cores = (await this._arduino().coreSearch(query)).slice(0, 25);
+    return { success: true, tool: 'search_board_cores', count: cores.length, cores };
+  }
+
+  async executeInstallBoardCore(args = {}) {
+    const id = String(args.id || '').trim();
+    if (!id) return { success: false, error: 'A core ID is required (e.g. "esp32:esp32").' };
+    try {
+      const r = await this._arduino().coreInstall(id);
+      return { success: true, tool: 'install_board_core', id, output: r.output };
+    } catch (err) {
+      return { success: false, tool: 'install_board_core', id, error: err.message };
+    }
+  }
+
+  async executeListBoardCores() {
+    const installed = (await this._arduino().coreList()).map(c => ({ id: c.id, version: c.installed }));
+    return { success: true, tool: 'list_board_cores', count: installed.length, installed };
   }
 }
 

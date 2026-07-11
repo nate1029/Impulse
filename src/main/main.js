@@ -18,6 +18,10 @@ const notifications = require('./utils/notifications');
 const TerminalService = require('./services/terminal');
 const PluginManager = require('./services/pluginManager');
 const CollaborationService = require('./services/collaboration');
+const WorkspaceService = require('./services/workspace');
+const ChatHistoryService = require('./services/chatHistory');
+const AuthService = require('./services/authService');
+const pendingEdits = require('./services/ai/pendingEdits');
 
 let mainWindow;
 let arduinoService;
@@ -26,13 +30,17 @@ let errorMemory;
 let aiAgent;
 let apiKeyManager;
 let terminalService;
+let workspaceService;
+let chatHistory;
+let authService;
 
 const uiState = {
   currentBaudRate: 115200,
   currentSketchPath: null,
   selectedBoard: null,
   selectedPort: null,
-  editorCode: ''
+  editorCode: '',
+  workspaceRoot: null
 };
 
 /**
@@ -51,6 +59,8 @@ function createWindow() {
     width: 1400,
     height: 900,
     show: false,
+    frame: false,
+    backgroundColor: '#101010',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -63,6 +73,18 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
+  // Custom titlebar (frameless window): window controls + maximize state
+  mainWindow.on('maximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized-change', true);
+    }
+  });
+  mainWindow.on('unmaximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized-change', false);
+    }
   });
 
   // SECURITY: Prevent navigation to external websites within the app
@@ -244,7 +266,7 @@ function createWindow() {
         { label: 'Frequently Asked Questions', click: () => sendMenuAction('help-faq') },
         { label: 'Visit Arduino.cc', click: () => sendMenuAction('help-visit-arduino') },
         { type: 'separator' },
-        { label: 'About Arduino IDE', click: () => sendMenuAction('help-about') }
+        { label: 'About Impulse IDE', click: () => sendMenuAction('help-about') }
       ]
     }
   ];
@@ -253,14 +275,54 @@ function createWindow() {
 
 }
 
+// Window controls for the custom (frameless) titlebar. Registered once at
+// module scope — createWindow can run again on macOS 'activate'.
+ipcMain.on('window:minimize', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+});
+ipcMain.on('window:maximize-toggle', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  }
+});
+ipcMain.on('window:close', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+});
+
 app.whenReady().then(() => {
   debug('app.whenReady', {});
   arduinoService = new ArduinoService();
   serialMonitor = new SerialMonitor();
   errorMemory = new ErrorMemory();
   apiKeyManager = new APIKeyManager();
-  aiAgent = new AIAgent(arduinoService, serialMonitor, errorMemory);
+  workspaceService = new WorkspaceService();
+  chatHistory = new ChatHistoryService();
+  authService = new AuthService();
+  aiAgent = new AIAgent(arduinoService, serialMonitor, errorMemory, {}, workspaceService);
   aiAgent.initializeProviders();
+
+  // Stream live tool activity to the agent panel while a turn runs.
+  aiAgent.onToolEvent = (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('ai:tool-event', event);
+    }
+  };
+  // Stream text tokens from the provider to the agent panel as they arrive.
+  aiAgent.onTextChunk = (delta) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('ai:text-chunk', delta);
+    }
+  };
+
+  // Pending-edit modal: route requests to the renderer, unblock pending
+  // approvals if the user cancels the turn.
+  pendingEdits.setSender((channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload);
+    }
+  });
+  aiAgent.onCancel = () => pendingEdits.rejectAll();
 
   if (aiAgent.toolExecutor) {
     aiAgent.toolExecutor.setUICallbacks({
@@ -286,6 +348,19 @@ app.whenReady().then(() => {
         return uiState.editorCode || '';
       },
       setEditorCode: async (code) => {
+        const before = uiState.editorCode || '';
+        // No-op change — apply silently, no modal.
+        if (before === code) return;
+        const accepted = await pendingEdits.request({
+          before,
+          after: code,
+          filepath: uiState.currentSketchPath || null
+        });
+        if (!accepted) {
+          const err = new Error('User rejected the proposed change');
+          err.code = 'USER_REJECTED';
+          throw err;
+        }
         uiState.editorCode = code;
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('ui:set-editor-code', code);
@@ -304,6 +379,17 @@ app.whenReady().then(() => {
       setPlayground: async (content, append) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('playground:update', content, append);
+        }
+      },
+      reviewFileWrite: async (before, after, filepath) => {
+        return await pendingEdits.request({ before, after, filepath });
+      },
+      getApiKey: (provider) => {
+        try { return apiKeyManager.getAPIKey(provider); } catch { return null; }
+      },
+      onFileWritten: async (relPath, absPath, content) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('workspace:file-written', { path: relPath, absPath, content });
         }
       }
     });
@@ -376,6 +462,71 @@ app.whenReady().then(() => {
   ipcMain.handle('terminal:resize', (_event, id, cols, rows) => { terminalService.resize(id, cols, rows); });
   ipcMain.handle('terminal:kill', (_event, id) => { terminalService.kill(id); });
   ipcMain.handle('terminal:list', () => terminalService.list());
+
+  // Workspace — confines agent file access to the open project folder
+  ipcMain.handle('workspace:set-root', (_event, root) => {
+    if (typeof root === 'string' && root.trim()) {
+      const resolved = workspaceService.setRoot(root);
+      uiState.workspaceRoot = resolved;
+      try { require('./utils/pathValidator').approveDirectory(resolved); } catch (_) {}
+      return { success: true, root: resolved };
+    }
+    workspaceService.setRoot(null);
+    uiState.workspaceRoot = null;
+    return { success: true, root: null };
+  });
+
+  ipcMain.handle('workspace:list-files', async () => {
+    try { return { success: true, entries: await workspaceService.listFilesFlat() }; }
+    catch (error) { return { success: false, error: error?.message || 'list-files failed' }; }
+  });
+
+  ipcMain.handle('workspace:read-rules', async () => {
+    const root = workspaceService.getRoot();
+    if (!root) return { success: false, error: 'No workspace folder open' };
+    try {
+      const { content } = await workspaceService.readFile('IMPULSE.md');
+      return { success: true, content };
+    } catch (_) {
+      return { success: true, content: '' }; // file may not exist yet
+    }
+  });
+
+  ipcMain.handle('workspace:write-rules', async (_event, content) => {
+    const root = workspaceService.getRoot();
+    if (!root) return { success: false, error: 'No workspace folder open' };
+    try {
+      await workspaceService.writeFile('IMPULSE.md', String(content || ''));
+      return { success: true };
+    } catch (error) { return { success: false, error: error?.message || 'write failed' }; }
+  });
+
+  // Chat history — persisted AI sessions
+  const chatSafe = (fn) => async (...args) => {
+    try { return { success: true, data: await fn(...args) }; }
+    catch (e) { return { success: false, error: e?.message ?? 'Chat history error' }; }
+  };
+  ipcMain.handle('chat:list', chatSafe((_e) => chatHistory.list()));
+  ipcMain.handle('chat:get', chatSafe((_e, id) => chatHistory.get(String(id))));
+  ipcMain.handle('chat:create', chatSafe((_e, title, model) => chatHistory.create(title, model)));
+  ipcMain.handle('chat:append', chatSafe((_e, id, message) => chatHistory.append(String(id), message || {})));
+  ipcMain.handle('chat:rename', chatSafe((_e, id, title) => chatHistory.rename(String(id), title)));
+  ipcMain.handle('chat:delete', chatSafe((_e, id) => chatHistory.remove(String(id))));
+
+  // Auth — Google sign-in gate
+  ipcMain.handle('auth:status', () => ({
+    configured: authService.isConfigured(),
+    user: authService.getUser()
+  }));
+  ipcMain.handle('auth:sign-in', async () => {
+    try {
+      const user = await authService.signIn();
+      return { success: true, user };
+    } catch (e) {
+      return { success: false, error: e?.message ?? 'Sign-in failed' };
+    }
+  });
+  ipcMain.handle('auth:sign-out', async () => authService.signOut());
 
   // Plugin system — use Electron userData for portable installs (dev and packaged)
   const appDataPath = app.getPath('userData');

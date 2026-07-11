@@ -18,21 +18,16 @@ class ClaudeProvider extends BaseProvider {
     this.client = new Anthropic({ apiKey: this.apiKey });
   }
 
+  // Curated to agent-capable models. Old 3.5/3.x haiku + opus-3 were removed —
+  // superseded and weaker at multi-step tool use.
   getAvailableModels() {
     return [
-      // Claude 5 family
       'claude-sonnet-5',
       'claude-fable-5',
-      // Claude 4.x family
       'claude-opus-4-8',
       'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
-      // Claude 3.x (legacy, still valid)
-      'claude-3-7-sonnet-20250219',
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-haiku-20241022',
-      'claude-3-opus-20240229',
-      'claude-3-haiku-20240307'
+      'claude-3-7-sonnet-20250219'
     ];
   }
 
@@ -44,20 +39,13 @@ class ClaudeProvider extends BaseProvider {
     }));
   }
 
-  async chat(messages, options = {}) {
-    const tools = getToolsForOptions(options);
-    const useTools = Array.isArray(tools) && tools.length > 0;
-    const formattedTools = useTools ? this.formatTools(tools) : [];
-
-    // Separate system message from other messages
+  _translateMessages(messages) {
     let systemMessage = '';
     const conversationMessages = [];
-
     for (const msg of messages) {
       if (msg.role === 'system') {
         systemMessage += msg.content + '\n';
       } else if (msg.role === 'tool') {
-        // Handle tool result messages - Claude expects these in user role
         conversationMessages.push({
           role: 'user',
           content: [{
@@ -67,62 +55,58 @@ class ClaudeProvider extends BaseProvider {
           }]
         });
       } else if (msg.role === 'assistant') {
-        // Assistant may have tool_calls (from agent) - Claude expects content as array of blocks
         let content;
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           const blocks = [];
-          if (msg.content) {
-            blocks.push({ type: 'text', text: msg.content });
-          }
+          if (msg.content) blocks.push({ type: 'text', text: msg.content });
           for (const tc of msg.tool_calls) {
             const raw = tc.function?.arguments ?? tc.arguments;
             let input = {};
-            if (typeof raw === 'string') {
-              try { input = JSON.parse(raw || '{}'); } catch { input = {}; }
-            } else if (raw && typeof raw === 'object') {
-              input = raw;
-            }
-            blocks.push({
-              type: 'tool_use',
-              id: tc.id,
-              name: tc.function?.name || tc.name,
-              input
-            });
+            if (typeof raw === 'string') { try { input = JSON.parse(raw || '{}'); } catch { input = {}; } }
+            else if (raw && typeof raw === 'object') input = raw;
+            blocks.push({ type: 'tool_use', id: tc.id, name: tc.function?.name || tc.name, input });
           }
           content = blocks;
         } else {
           content = msg.content || '';
         }
-        conversationMessages.push({
-          role: 'assistant',
-          content
-        });
+        conversationMessages.push({ role: 'assistant', content });
       } else {
-        conversationMessages.push({
-          role: 'user',
-          content: msg.content
-        });
+        // Multi-modal canonical → Claude
+        let content = msg.content;
+        if (Array.isArray(msg.content)) {
+          content = msg.content.map(part => part.type === 'image'
+            ? { type: 'image', source: { type: 'base64', media_type: part.mimeType, data: part.data } }
+            : { type: 'text', text: part.text || '' });
+        }
+        conversationMessages.push({ role: 'user', content });
       }
     }
+    return { systemMessage, conversationMessages };
+  }
 
+  _buildCreateOptions(messages, options) {
+    const tools = getToolsForOptions(options);
+    const useTools = Array.isArray(tools) && tools.length > 0;
+    const { systemMessage, conversationMessages } = this._translateMessages(messages);
+    // Legacy Claude 3 models hard-cap output at 4096 tokens.
+    const cap = /^claude-3-(opus|sonnet|haiku)-/.test(this.model) ? 4096 : 8192;
     const createOptions = {
       model: this.model,
-      max_tokens: options.max_tokens || 2000,
+      max_tokens: Math.min(options.max_tokens || 8192, cap),
       temperature: options.temperature || 0.7,
       system: systemMessage || undefined,
       messages: conversationMessages
     };
-    if (useTools) createOptions.tools = formattedTools;
-    const response = await this.client.messages.create(createOptions);
+    if (useTools) createOptions.tools = this.formatTools(tools);
+    return createOptions;
+  }
 
-    // Extract text content
+  _formatResponse(response) {
     let text = '';
     for (const content of response.content) {
-      if (content.type === 'text') {
-        text += content.text;
-      }
+      if (content.type === 'text') text += content.text;
     }
-
     return {
       content: text,
       toolCalls: this.parseToolCalls(response),
@@ -132,6 +116,22 @@ class ClaudeProvider extends BaseProvider {
       },
       model: response.model
     };
+  }
+
+  async chat(messages, options = {}) {
+    const createOptions = this._buildCreateOptions(messages, options);
+    const response = await this.client.messages.create(createOptions);
+    return this._formatResponse(response);
+  }
+
+  async chatStream(messages, options = {}, onDelta) {
+    const createOptions = this._buildCreateOptions(messages, options);
+    const stream = this.client.messages.stream(createOptions);
+    if (typeof onDelta === 'function') {
+      stream.on('text', (delta) => { try { onDelta({ text: delta }); } catch (_) { /* UI-only */ } });
+    }
+    const finalMessage = await stream.finalMessage();
+    return this._formatResponse(finalMessage);
   }
 
   parseToolCalls(response) {

@@ -505,10 +505,18 @@ class ArduinoService {
           sketchPath
         ];
 
+        // No spawn-level timeout — a single manual timer below is the one source
+        // of truth (and gets cleared on completion so it never dangles).
         const compileProcess = spawn(this.cliPath, args, {
-          cwd: path.dirname(sketchPath),
-          timeout: 120000 // 2 minute timeout
+          cwd: path.dirname(sketchPath)
         });
+
+        // Cold builds of large cores (ESP32/ESP8266/STM32) compile the whole
+        // platform the first time and legitimately take several minutes; the
+        // Arduino IDE imposes no short limit. Cached rebuilds finish in seconds,
+        // so a generous ceiling costs fast boards nothing.
+        const COMPILE_TIMEOUT_MS = 10 * 60 * 1000;
+        let killTimer = null;
 
         let stdout = '';
         let stderr = '';
@@ -530,6 +538,7 @@ class ArduinoService {
         });
 
         compileProcess.on('close', (code) => {
+          clearTimeout(killTimer);
           clearInterval(progressInterval);
           notifications.dismiss(progressId);
 
@@ -559,24 +568,25 @@ class ArduinoService {
         });
 
         compileProcess.on('error', (error) => {
+          clearTimeout(killTimer);
           clearInterval(progressInterval);
           notifications.dismiss(progressId);
-          
+
           const friendlyError = new Error(`Failed to start compilation: ${error.message}`);
           notifications.error('Failed to start compilation process');
           reject(friendlyError);
         });
 
-        // Handle timeout
-        setTimeout(() => {
+        // Handle timeout (cleared on close/error so it never fires late)
+        killTimer = setTimeout(() => {
           if (!compileProcess.killed) {
             compileProcess.kill();
             clearInterval(progressInterval);
             notifications.dismiss(progressId);
-            notifications.error('Compilation timed out after 2 minutes');
-            reject(new Error('Compilation timed out. The sketch may be too complex or there may be an issue with the Arduino CLI.'));
+            notifications.error('Compilation timed out after 10 minutes');
+            reject(new Error('Compilation timed out after 10 minutes. This is unusual even for a cold ESP32/ESP8266 build — check that arduino-cli is healthy and the board core is installed.'));
           }
-        }, 120000);
+        }, COMPILE_TIMEOUT_MS);
       });
 
     } catch (error) {
@@ -636,9 +646,14 @@ class ArduinoService {
         ];
 
         const uploadProcess = spawn(this.cliPath, args, {
-          cwd: path.dirname(sketchPath),
-          timeout: 60000 // 1 minute timeout for upload
+          cwd: path.dirname(sketchPath)
         });
+
+        // Large firmware over a slow serial baud (or esptool re-flashing an ESP)
+        // can exceed a minute; give real headroom. One manual timer, cleared on
+        // completion.
+        const UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
+        let killTimer = null;
 
         let stdout = '';
         let stderr = '';
@@ -660,6 +675,7 @@ class ArduinoService {
         });
 
         uploadProcess.on('close', (code) => {
+          clearTimeout(killTimer);
           clearInterval(progressInterval);
           notifications.dismiss(progressId);
 
@@ -695,24 +711,25 @@ class ArduinoService {
         });
 
         uploadProcess.on('error', (error) => {
+          clearTimeout(killTimer);
           clearInterval(progressInterval);
           notifications.dismiss(progressId);
-          
+
           const friendlyError = new Error(`Failed to start upload: ${error.message}`);
           notifications.error('Failed to start upload process');
           reject(friendlyError);
         });
 
-        // Handle timeout
-        setTimeout(() => {
+        // Handle timeout (cleared on close/error so it never fires late)
+        killTimer = setTimeout(() => {
           if (!uploadProcess.killed) {
             uploadProcess.kill();
             clearInterval(progressInterval);
             notifications.dismiss(progressId);
-            notifications.error('Upload timed out after 1 minute');
-            reject(new Error('Upload timed out. Please check your connection and try again.'));
+            notifications.error('Upload timed out after 3 minutes');
+            reject(new Error('Upload timed out after 3 minutes. Check the cable/port, that the board is in the right mode, and that no Serial Monitor is holding the port.'));
           }
-        }, 60000);
+        }, UPLOAD_TIMEOUT_MS);
       });
 
     } catch (error) {

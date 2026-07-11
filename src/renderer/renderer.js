@@ -30,6 +30,10 @@ let state = window.state = {
     aiModelSuggestion: null,
     aiTokensUsed: 0,       // cumulative input tokens this session
     aiCompacting: false,   // guard against concurrent compaction
+    aiTurnRunning: false,  // true while a processQuery turn is in flight
+    autoVerify: false,     // "Verify" toggle — instruct agent to close the hardware loop
+    chatSessionId: null,   // persisted chat-history session id
+    authUser: null,        // signed-in Google user (null = anonymous/dev)
     apiKeyModalProvider: null,
     folderRoot: null,
     expandedDirs: new Set(),
@@ -85,11 +89,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         await restoreSession();
 
         setupNativeMenuListener();
+        setupTitlebar();
         setupActivityBar();
         setupSidebarCollapse();
         setupEventListeners();
+        initAuthGate();
         setupSerialListeners();
+        setupWorkspaceListeners();
         setupAIListeners();
+        setupAgentPanelExtras();
         setupUIStateSync();
         setupOutputTabs();
         setupKeyboardShortcuts();
@@ -273,6 +281,173 @@ function setupNativeMenuListener() {
         window.electronAPI.menu.onAction((action) => {
             handleMenuAction(action);
         });
+    }
+}
+
+// ============================================
+// Custom titlebar — frameless window menus + controls.
+// Items mirror the native application menu in main.js (which stays
+// registered for its keyboard accelerators) and fire the exact same actions.
+// ============================================
+const TITLEBAR_MENUS = [
+    { label: 'File', items: [
+        { label: 'New Sketch', action: 'file-new', key: 'Ctrl+N' },
+        { label: 'Open…', action: 'file-open', key: 'Ctrl+O' },
+        { label: 'Open Folder…', action: 'file-open-folder' },
+        { label: 'Examples', action: 'file-examples' },
+        { label: 'Sketchbook', action: 'file-sketchbook' },
+        null,
+        { label: 'Save', action: 'file-save', key: 'Ctrl+S' },
+        { label: 'Save As…', action: 'file-save-as', key: 'Ctrl+Shift+S' },
+        null,
+        { label: 'Preferences…', action: 'file-preferences', key: 'Ctrl+,' },
+        null,
+        { label: 'Close', action: 'file-close', key: 'Ctrl+W' },
+        { label: 'Quit', action: 'file-quit', key: 'Ctrl+Q' }
+    ]},
+    { label: 'Edit', items: [
+        { label: 'Undo', action: 'edit-undo', key: 'Ctrl+Z' },
+        { label: 'Redo', action: 'edit-redo', key: 'Ctrl+Y' },
+        null,
+        { label: 'Cut', action: 'edit-cut', key: 'Ctrl+X' },
+        { label: 'Copy', action: 'edit-copy', key: 'Ctrl+C' },
+        { label: 'Paste', action: 'edit-paste', key: 'Ctrl+V' },
+        { label: 'Select All', action: 'edit-select-all', key: 'Ctrl+A' },
+        null,
+        { label: 'Go to Line…', action: 'edit-goto-line', key: 'Ctrl+L' },
+        { label: 'Comment/Uncomment', action: 'edit-comment', key: 'Ctrl+/' },
+        { label: 'Auto Format', action: 'edit-format', key: 'Ctrl+T' },
+        null,
+        { label: 'Find', action: 'edit-find', key: 'Ctrl+F' },
+        { label: 'Find Next', action: 'edit-find-next', key: 'Ctrl+G' },
+        { label: 'Find Previous', action: 'edit-find-prev', key: 'Ctrl+Shift+G' },
+        null,
+        { label: 'Increase Font Size', action: 'edit-font-increase', key: 'Ctrl+=' },
+        { label: 'Decrease Font Size', action: 'edit-font-decrease', key: 'Ctrl+-' }
+    ]},
+    { label: 'Sketch', items: [
+        { label: 'Verify/Compile', action: 'sketch-verify', key: 'Ctrl+R' },
+        { label: 'Upload', action: 'sketch-upload', key: 'Ctrl+U' },
+        { label: 'Upload Using Programmer', action: 'sketch-upload-programmer', key: 'Ctrl+Shift+U' },
+        null,
+        { label: 'Export Compiled Binary', action: 'sketch-export-binary' },
+        { label: 'Show Sketch Folder', action: 'sketch-show-folder' },
+        null,
+        { label: 'Include Library', action: 'sketch-include-library' },
+        { label: 'Add Tab', action: 'sketch-add-tab' },
+        { label: 'Add File…', action: 'sketch-add-file' }
+    ]},
+    { label: 'Tools', items: [
+        { label: 'Auto Format', action: 'tools-format', key: 'Ctrl+T' },
+        { label: 'Archive Sketch', action: 'tools-archive' },
+        null,
+        { label: 'Manage Libraries…', action: 'tools-manage-libs', key: 'Ctrl+Shift+I' },
+        { label: 'Serial Monitor', action: 'tools-serial-monitor', key: 'Ctrl+Shift+M' },
+        { label: 'Serial Plotter', action: 'tools-serial-plotter' },
+        null,
+        { label: 'Board', action: 'tools-board' },
+        { label: 'Port', action: 'tools-port' },
+        { label: 'Reload Board Data', action: 'tools-reload-boards' },
+        { label: 'Get Board Info', action: 'tools-get-board-info' }
+    ]},
+    { label: 'Help', items: [
+        { label: 'Getting Started', action: 'help-getting-started' },
+        { label: 'Environment', action: 'help-environment' },
+        { label: 'Troubleshooting', action: 'help-troubleshooting' },
+        { label: 'Reference', action: 'help-reference' },
+        null,
+        { label: 'Frequently Asked Questions', action: 'help-faq' },
+        { label: 'Visit Arduino.cc', action: 'help-visit-arduino' },
+        null,
+        { label: 'About Impulse IDE', action: 'help-about' }
+    ]}
+];
+
+function setupTitlebar() {
+    const bar = document.getElementById('titlebar');
+    const nav = document.getElementById('titlebarMenus');
+    if (!bar || !nav) return;
+
+    let openDropdown = null;
+    let openButton = null;
+
+    const closeMenus = () => {
+        if (openDropdown) { openDropdown.remove(); openDropdown = null; }
+        if (openButton) { openButton.classList.remove('open'); openButton = null; }
+    };
+
+    const openMenuFor = (btn, menu) => {
+        closeMenus();
+        const drop = document.createElement('div');
+        drop.className = 'menu-dropdown open titlebar-dropdown';
+        for (const item of menu.items) {
+            if (!item) {
+                const div = document.createElement('div');
+                div.className = 'menu-divider';
+                drop.appendChild(div);
+                continue;
+            }
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.innerHTML = `<span>${escapeHtml(item.label)}</span>` +
+                (item.key ? `<kbd>${escapeHtml(item.key)}</kbd>` : '');
+            b.addEventListener('click', () => {
+                closeMenus();
+                handleMenuAction(item.action);
+            });
+            drop.appendChild(b);
+        }
+        document.body.appendChild(drop);
+        const r = btn.getBoundingClientRect();
+        drop.style.left = `${Math.round(r.left)}px`;
+        drop.style.top = `${Math.round(r.bottom)}px`;
+        btn.classList.add('open');
+        openDropdown = drop;
+        openButton = btn;
+    };
+
+    for (const menu of TITLEBAR_MENUS) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'titlebar-menu-btn';
+        btn.textContent = menu.label;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (openButton === btn) closeMenus();
+            else openMenuFor(btn, menu);
+        });
+        // Real menubar behavior: while one menu is open, hovering switches
+        btn.addEventListener('mouseenter', () => {
+            if (openDropdown && openButton !== btn) openMenuFor(btn, menu);
+        });
+        nav.appendChild(btn);
+    }
+
+    document.addEventListener('click', (e) => {
+        if (openDropdown && !openDropdown.contains(e.target)) closeMenus();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeMenus();
+    });
+
+    // Window controls
+    const winApi = window.electronAPI.win;
+    if (winApi) {
+        document.getElementById('winMinBtn')?.addEventListener('click', () => winApi.minimize());
+        document.getElementById('winMaxBtn')?.addEventListener('click', () => winApi.maximizeToggle());
+        document.getElementById('winCloseBtn')?.addEventListener('click', () => winApi.close());
+        bar.addEventListener('dblclick', (e) => {
+            // Only on the drag surface — not menus or controls
+            if (e.target === bar || e.target.closest('.titlebar-app, .titlebar-spacer')) {
+                winApi.maximizeToggle();
+            }
+        });
+        winApi.onMaximizedChange?.((maximized) => {
+            document.getElementById('winMaxBtn')?.classList.toggle('maximized', maximized);
+        });
+    } else {
+        // Older main process without frameless support: hide the controls
+        bar.querySelector('.titlebar-controls')?.setAttribute('hidden', '');
     }
 }
 
@@ -473,6 +648,7 @@ async function newSketch() {
         }
         state.folderRoot = result.folderPath;
         state.expandedDirs.clear();
+        invalidateMentionCache();
         const label = document.getElementById('folderLabel');
         const name = result.folderPath.split(/[/\\]/).pop() || result.folderPath;
         if (label) label.innerHTML = `<span class="folder-icon">📁</span><span>${escapeHtml(name)}</span>`;
@@ -648,6 +824,7 @@ async function saveFileAs() {
         }
         state.folderRoot = result.folderPath;
         state.expandedDirs.clear();
+        invalidateMentionCache();
         const label = document.getElementById('folderLabel');
         const name = result.folderPath.split(/[/\\]/).pop() || result.folderPath;
         if (label) label.innerHTML = `<span class="folder-icon">📁</span><span>${escapeHtml(name)}</span>`;
@@ -941,7 +1118,8 @@ function setupUserApiKeys() {
     const providers = [
         { id: 'gemini',  label: 'Google Gemini',  placeholder: 'AIza...' },
         { id: 'openai',  label: 'OpenAI',         placeholder: 'sk-...' },
-        { id: 'claude',  label: 'Anthropic Claude', placeholder: 'sk-ant-...' }
+        { id: 'claude',  label: 'Anthropic Claude', placeholder: 'sk-ant-...' },
+        { id: 'tavily',  label: 'Tavily (web search)', placeholder: 'tvly-...' }
     ];
 
     // --- Helpers ---
@@ -1434,6 +1612,25 @@ function handleSerialChunk(chunk, timestamp) {
     }
 }
 
+function setupWorkspaceListeners() {
+    if (!window.electronAPI.workspace) return;
+    window.electronAPI.workspace.onFileWritten(({ path: relPath, absPath, content }) => {
+        // If the written file is open in a tab, update its buffer without marking dirty.
+        const idx = state.openFiles.findIndex(f => f.path === absPath || f.path === relPath);
+        if (idx >= 0) {
+            state.openFiles[idx].content = content;
+            if (idx === state.activeTabIndex && state.editor) {
+                const cur = state.editor.getCursor();
+                state.editor.setValue(content);
+                try { state.editor.setCursor(cur); } catch (_) {}
+            }
+        }
+        // Refresh the file tree so new files appear.
+        if (state.folderRoot) { try { renderFileTree(state.folderRoot); } catch (_) {} }
+        logToConsole(`AI wrote ${relPath}`, 'info');
+    });
+}
+
 function setupSerialListeners() {
     window.electronAPI.serial.onData((data) => {
         handleSerialChunk(data.data, data.timestamp);
@@ -1469,20 +1666,44 @@ function setupSerialListeners() {
 // AI Panel Listeners
 // ============================================
 function setupAIListeners() {
-    document.getElementById('aiModeSelect')?.addEventListener('change', (e) => {
-        state.aiMode = e.target.value;
-        saveAIPreferences();
+    document.querySelectorAll('#aiModeSeg .ai-mode-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.aiMode = btn.dataset.mode;
+            syncModePills();
+            saveAIPreferences();
+        });
     });
+    // Auto-verify toggle: persisted in localStorage, sent alongside every turn
+    state.autoVerify = localStorage.getItem('impulse.autoVerify') === '1';
+    const verifyBtn = document.getElementById('aiVerifyToggle');
+    if (verifyBtn) {
+        verifyBtn.classList.toggle('on', state.autoVerify);
+        verifyBtn.addEventListener('click', () => {
+            state.autoVerify = !state.autoVerify;
+            localStorage.setItem('impulse.autoVerify', state.autoVerify ? '1' : '0');
+            verifyBtn.classList.toggle('on', state.autoVerify);
+        });
+    }
     document.getElementById('aiModelSelect')?.addEventListener('change', onAIModelChange);
     document.getElementById('aiPinModelBtn')?.addEventListener('click', togglePinCurrentModel);
-    document.getElementById('aiCompactBtn')?.addEventListener('click', compactConversation);
+
     document.getElementById('aiClearBtn')?.addEventListener('click', clearChatUI);
+    document.getElementById('aiRulesBtn')?.addEventListener('click', openRulesEditor);
     document.getElementById('aiSettingsBtn')?.addEventListener('click', openAPIKeyModalForCurrentProvider);
-    document.getElementById('aiSend')?.addEventListener('click', sendAIMessage);
+    document.getElementById('aiSend')?.addEventListener('click', () => {
+        if (state.aiTurnRunning) { window.electronAPI.ai.cancel(); return; }
+        sendAIMessage();
+    });
     document.getElementById('aiInput')?.addEventListener('keypress', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendAIMessage();
+        }
+    });
+    document.getElementById('aiInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && state.aiTurnRunning) {
+            e.preventDefault();
+            window.electronAPI.ai.cancel();
         }
     });
     document.getElementById('apiKeyCancel')?.addEventListener('click', closeAPIKeyModal);
@@ -1578,6 +1799,7 @@ async function checkArduinoCLI() {
         }
         logToConsole(`CLI check error: ${error.message}`, 'error');
     }
+    updateFooterStatus();
 }
 
 async function loadBoards() {
@@ -1724,7 +1946,12 @@ async function refreshPortsQuiet() {
 }
 
 function startPortAutoRefresh() {
-    setInterval(refreshPortsQuiet, 3000);
+    // Enumerating serial ports costs USB churn + battery — don't do it while
+    // the window is hidden/minimized. Catch up immediately on return.
+    setInterval(() => { if (!document.hidden) refreshPortsQuiet(); }, 3000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) refreshPortsQuiet();
+    });
 }
 
 // ============================================
@@ -1978,6 +2205,9 @@ async function openExampleAtPath(exampleFolderPath) {
         const name = exampleFolderPath.split(/[/\\]/).pop() || 'Example';
         if (label) label.innerHTML = `<span class="folder-icon">📁</span><span>${escapeHtml(name)}</span>`;
         await renderFileTree(exampleFolderPath);
+        if (window.electronAPI.workspace) {
+            await window.electronAPI.workspace.setRoot(exampleFolderPath);
+        }
         const fileResult = await window.electronAPI.file.read(inoFile.path);
         const content = fileResult.success ? fileResult.content : '';
         showEditor();
@@ -2006,6 +2236,7 @@ async function openFolder() {
         if (result.success && result.folderPath) {
             state.folderRoot = result.folderPath;
             state.expandedDirs.clear();
+            invalidateMentionCache();
 
             const label = document.getElementById('folderLabel');
             const name = result.folderPath.split(/[/\\]/).pop() || result.folderPath;
@@ -2014,6 +2245,9 @@ async function openFolder() {
             }
 
             await renderFileTree(result.folderPath);
+            if (window.electronAPI.workspace) {
+                await window.electronAPI.workspace.setRoot(result.folderPath);
+            }
             saveSession();
             logToConsole(`Opened folder: ${name}`, 'success');
         }
@@ -3166,6 +3400,9 @@ async function restoreSession() {
                     label.innerHTML = `<span class="folder-icon">📁</span><span>${escapeHtml(name)}</span>`;
                 }
                 await renderFileTree(session.folderPath);
+                if (window.electronAPI.workspace) {
+                    await window.electronAPI.workspace.setRoot(session.folderPath);
+                }
             }
             // If folder not available: do nothing, boot as is (no folder open)
         }
@@ -3226,8 +3463,7 @@ async function restoreAIPreferences() {
         const prefs = JSON.parse(raw);
         if (prefs.mode && ['agent', 'ask', 'debug'].includes(prefs.mode)) {
             state.aiMode = prefs.mode;
-            const modeSelect = document.getElementById('aiModeSelect');
-            if (modeSelect) modeSelect.value = prefs.mode;
+            syncModePills();
         }
         if (prefs.modelId) {
             state.aiModelId = prefs.modelId;
@@ -3281,14 +3517,10 @@ function syncPinButton() {
         : 'Pin this model (stops auto-upgrade for it)';
 }
 
-// Build a dropdown label with badges: ✦ newest of its provider, ★ most-used.
+// Clean label only — pinned/newest state lives in the pin button and
+// tooltips, not as glyphs leaking into the control (reads as debug output).
 function modelOptionLabel(m, suggestion) {
-    let label = m.displayName || m.id;
-    const badges = [];
-    if (m.latest) badges.push('✦');
-    if (suggestion && suggestion.mostUsed === m.id) badges.push('★');
-    if (suggestion && suggestion.pinned === m.id) badges.push('📌');
-    return badges.length ? `${label}  ${badges.join(' ')}` : label;
+    return m.displayName || m.id;
 }
 
 async function loadAIUnifiedModels() {
@@ -3624,6 +3856,10 @@ function addCompactDivider(summary) {
 // inject a divider card, reset token counter.
 async function compactConversation() {
     if (state.aiCompacting) return;
+    // Nothing visible to compact — a summary bar floating in an empty chat
+    // reads as broken state.
+    const msgArea = document.getElementById('aiMessages');
+    if (!msgArea || !msgArea.querySelector('.ai-message')) return;
     state.aiCompacting = true;
     const thinkingId = addAIMessage('assistant', '<span class="shimmer-text">Compacting conversation…</span>', true, true);
     try {
@@ -3645,11 +3881,590 @@ async function compactConversation() {
     }
 }
 
+// ============================================
+// Auth gate — Google sign-in wall
+// ============================================
+async function initAuthGate() {
+    const overlay = document.getElementById('loginOverlay');
+    if (!overlay || !window.electronAPI.auth) return;
+    let status;
+    try { status = await window.electronAPI.auth.status(); } catch (_) { return; }
+    state.authUser = status.user || null;
+    updateAccountBadge();
+    // No wall when OAuth isn't configured (dev) or user already signed in.
+    if (!status.configured || status.user) return;
+
+    overlay.hidden = false;
+    const btn = document.getElementById('loginGoogleBtn');
+    const statusEl = document.getElementById('loginStatus');
+    btn?.addEventListener('click', async () => {
+        btn.disabled = true;
+        if (statusEl) statusEl.textContent = 'Complete sign-in in your browser…';
+        const res = await window.electronAPI.auth.signIn();
+        if (res.success) {
+            state.authUser = res.user;
+            updateAccountBadge();
+            overlay.hidden = true;
+            logToConsole(`Signed in as ${res.user.email}`, 'success');
+        } else {
+            if (statusEl) statusEl.textContent = res.error || 'Sign-in failed. Try again.';
+            btn.disabled = false;
+        }
+    });
+}
+
+function updateAccountBadge() {
+    const btn = document.getElementById('aiAccountBtn');
+    if (!btn) return;
+    if (state.authUser) {
+        btn.hidden = false;
+        btn.title = `${state.authUser.name} (${state.authUser.email}) — click to sign out`;
+        btn.textContent = (state.authUser.name || state.authUser.email || '?').charAt(0).toUpperCase();
+    } else {
+        btn.hidden = true;
+    }
+}
+
+// ============================================
+// Chat sessions — persistence + history UI
+// ============================================
+function timeAgo(ts) {
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    if (s < 7 * 86400) return `${Math.floor(s / 86400)}d ago`;
+    return new Date(ts).toLocaleDateString();
+}
+
+function updateSessionTitle(title) {
+    const el = document.getElementById('aiSessionTitle');
+    if (el) { el.textContent = title || ''; el.title = title || ''; }
+}
+
+function syncModePills() {
+    document.querySelectorAll('#aiModeSeg .ai-mode-pill').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === state.aiMode);
+    });
+}
+
+async function ensureChatSession(firstMessage) {
+    if (state.chatSessionId || !window.electronAPI.chats) return;
+    const title = String(firstMessage).replace(/\s+/g, ' ').slice(0, 48);
+    const model = document.getElementById('aiModelSelect')?.value || null;
+    const res = await window.electronAPI.chats.create(title, model);
+    if (res?.success && res.data) {
+        state.chatSessionId = res.data.id;
+        updateSessionTitle(res.data.title);
+    }
+}
+
+async function persistChatMessage(role, content, tools) {
+    if (!window.electronAPI.chats) return;
+    try {
+        if (role === 'user') await ensureChatSession(content);
+        if (!state.chatSessionId) return;
+        const model = document.getElementById('aiModelSelect')?.value || null;
+        await window.electronAPI.chats.append(state.chatSessionId, { role, content, tools, model });
+    } catch (_) { /* history must never break chat */ }
+}
+
+async function startNewChat() {
+    state.chatSessionId = null;
+    updateSessionTitle('');
+    try { await window.electronAPI.ai.clearHistory(); } catch (_) {}
+    state.aiTokensUsed = 0;
+    updateTokenCounter();
+    closeChatHistory();
+    renderAIWelcome();
+}
+
+async function openChatHistory() {
+    const panel = document.getElementById('aiHistoryPanel');
+    const list = document.getElementById('aiHistoryList');
+    if (!panel || !list || !window.electronAPI.chats) return;
+    panel.hidden = false;
+    list.innerHTML = '<div class="ai-history-empty">Loading…</div>';
+    const res = await window.electronAPI.chats.list();
+    const sessions = (res?.success && res.data) || [];
+    if (!sessions.length) {
+        list.innerHTML = '<div class="ai-history-empty">No past chats yet. Conversations are saved here automatically.</div>';
+        return;
+    }
+    list.innerHTML = '';
+    for (const s of sessions) {
+        const row = document.createElement('div');
+        row.className = 'ai-history-item' + (s.id === state.chatSessionId ? ' current' : '');
+        row.innerHTML =
+            `<div class="ai-history-item-main">` +
+            `<span class="ai-history-item-title">${escapeHtml(s.title)}</span>` +
+            `<span class="ai-history-item-meta">${timeAgo(s.updatedAt)} · ${s.messageCount || 0} msgs${s.model ? ' · ' + escapeHtml(s.model) : ''}</span>` +
+            `</div>` +
+            `<button class="ai-history-del" title="Delete chat">` +
+            `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>` +
+            `</button>`;
+        row.querySelector('.ai-history-item-main').addEventListener('click', () => loadChatSession(s.id));
+        row.querySelector('.ai-history-del').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await window.electronAPI.chats.remove(s.id);
+            if (state.chatSessionId === s.id) state.chatSessionId = null;
+            row.remove();
+            if (!list.children.length) openChatHistory();
+        });
+        list.appendChild(row);
+    }
+}
+
+function closeChatHistory() {
+    const panel = document.getElementById('aiHistoryPanel');
+    if (panel) panel.hidden = true;
+}
+
+async function loadChatSession(id) {
+    const res = await window.electronAPI.chats.get(id);
+    if (!res?.success || !res.data) return;
+    const session = res.data;
+    state.chatSessionId = session.id;
+    updateSessionTitle(session.title);
+    // Old transcript is restored visually; the agent's working context starts fresh.
+    try { await window.electronAPI.ai.clearHistory(); } catch (_) {}
+    state.aiTokensUsed = 0;
+    updateTokenCounter();
+    const container = document.getElementById('aiMessages');
+    if (container) {
+        container.innerHTML = '';
+        for (const m of session.messages || []) {
+            addAIMessage(m.role === 'user' ? 'user' : 'assistant', m.content);
+        }
+    }
+    addAIMessage('system', 'Restored from history — the agent continues with fresh context.');
+    closeChatHistory();
+}
+
+// ============================================
+// Agent activity card (Antigravity-style tool breadcrumbs)
+// ============================================
+const TOOL_LABELS = {
+    read_file: 'Read file', write_file: 'Wrote file', create_file: 'Created file',
+    list_directory: 'Listed folder', get_project_tree: 'Explored project', search_files: 'Searched files',
+    compile_sketch: 'Compiled sketch', upload_sketch: 'Uploaded to board',
+    connect_serial: 'Connected serial', read_serial: 'Read serial', send_serial: 'Sent serial',
+    get_editor_code: 'Read editor', set_editor_code: 'Rewrote editor', edit_code: 'Edited code',
+    search_code: 'Searched code', replace_in_code: 'Replaced in code', save_sketch: 'Saved sketch',
+    update_playground: 'Updated playground', get_current_state: 'Checked IDE state',
+    analyze_error: 'Analyzed error', search_memory: 'Searched memory', record_fix: 'Recorded fix'
+};
+
+// --- Live turn trace (Claude Code-style): tools stream in as they run ---
+let liveTurn = null;
+
+function beginLiveTurn() {
+    const container = document.getElementById('aiMessages');
+    if (!container) return null;
+    const welcome = container.querySelector('.ai-welcome, .ai-welcome-hero');
+    if (welcome) welcome.remove();
+
+    const card = document.createElement('div');
+    card.className = 'ai-activity running open';
+    card.innerHTML =
+        `<button class="ai-activity-head" type="button">` +
+        `<svg class="ai-activity-chevron" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>` +
+        `<span class="ai-activity-led"></span>` +
+        `<span class="ai-activity-title">Working</span>` +
+        `<span class="ai-activity-count">0.0s</span>` +
+        `</button>` +
+        `<div class="ai-activity-body"></div>`;
+    const body = card.querySelector('.ai-activity-body');
+    card.querySelector('.ai-activity-head').addEventListener('click', () => {
+        body.hidden = !body.hidden;
+        card.classList.toggle('open', !body.hidden);
+    });
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+
+    const started = Date.now();
+    const countEl = card.querySelector('.ai-activity-count');
+    const interval = setInterval(() => {
+        const s = (Date.now() - started) / 1000;
+        countEl.textContent = s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
+    }, 100);
+
+    liveTurn = { card, body, countEl, interval, rows: new Map(), toolCount: 0 };
+    return liveTurn;
+}
+
+function onLiveToolEvent(ev) {
+    if (!liveTurn || !ev) return;
+    const { card, body, rows } = liveTurn;
+    if (ev.phase === 'start') {
+        const label = TOOL_LABELS[ev.tool] || String(ev.tool || 'action').replace(/_/g, ' ');
+        const row = document.createElement('div');
+        row.className = 'ai-activity-row running';
+        row.innerHTML =
+            `<span class="ai-activity-dot"></span>` +
+            `<span class="ai-activity-name">${escapeHtml(label)}</span>` +
+            `<span class="ai-activity-detail">${escapeHtml(String(ev.detail || '').slice(0, 64))}</span>` +
+            `<span class="ai-activity-state">…</span>`;
+        body.appendChild(row);
+        if (ev.id) rows.set(ev.id, row);
+        liveTurn.toolCount++;
+        // Header mirrors what the agent is doing right now
+        const titleEl = card.querySelector('.ai-activity-title');
+        if (titleEl) titleEl.textContent = label;
+        const container = document.getElementById('aiMessages');
+        if (container) container.scrollTop = container.scrollHeight;
+    } else if (ev.phase === 'end') {
+        const row = (ev.id && rows.get(ev.id)) || body.querySelector('.ai-activity-row.running');
+        if (!row) return;
+        row.classList.remove('running');
+        if (ev.ok === false) row.classList.add('fail');
+        if (ev.detail) {
+            const d = row.querySelector('.ai-activity-detail');
+            if (d) d.textContent = String(ev.detail).slice(0, 64);
+        }
+        const st = row.querySelector('.ai-activity-state');
+        if (st) st.textContent = ev.ok === false ? 'failed' : (ev.ms >= 1000 ? `${(ev.ms / 1000).toFixed(1)}s` : '✓');
+    }
+}
+
+function finalizeLiveTurn(elapsedMs, toolResults) {
+    const t = liveTurn;
+    liveTurn = null;
+    if (!t) return;
+    clearInterval(t.interval);
+    // No live events arrived (older main process): fall back to summary card.
+    if (!t.toolCount && toolResults?.length) {
+        t.card.remove();
+        addToolActivityCard(toolResults, elapsedMs);
+        return;
+    }
+    if (!t.toolCount) { t.card.remove(); return; }
+    t.card.classList.remove('running');
+    t.body.querySelectorAll('.ai-activity-row.running').forEach(r => r.classList.remove('running'));
+    const failCount = t.body.querySelectorAll('.ai-activity-row.fail').length;
+    const secs = elapsedMs >= 1000 ? `${(elapsedMs / 1000).toFixed(elapsedMs < 10000 ? 1 : 0)}s` : `${elapsedMs}ms`;
+    const titleEl = t.card.querySelector('.ai-activity-title');
+    if (titleEl) titleEl.textContent = `Worked for ${secs}`;
+    t.countEl.textContent = `${t.toolCount} tool${t.toolCount > 1 ? 's' : ''}${failCount ? ` · ${failCount} failed` : ''}`;
+    // Collapse into the breadcrumb; the trace stays one click away
+    t.body.hidden = true;
+    t.card.classList.remove('open');
+}
+
+function cancelLiveTurn() {
+    const t = liveTurn;
+    liveTurn = null;
+    if (!t) return;
+    clearInterval(t.interval);
+    t.card.remove();
+}
+
+function addToolActivityCard(toolResults, elapsedMs) {
+    const container = document.getElementById('aiMessages');
+    if (!container || !toolResults?.length) return;
+    const okCount = toolResults.filter(t => t && t.success !== false).length;
+    const failCount = toolResults.length - okCount;
+    const secs = elapsedMs >= 1000 ? `${(elapsedMs / 1000).toFixed(elapsedMs < 10000 ? 1 : 0)}s` : `${elapsedMs}ms`;
+
+    const card = document.createElement('div');
+    card.className = 'ai-activity';
+    const rows = toolResults.map(t => {
+        const name = (t && t.tool) || 'action';
+        const label = TOOL_LABELS[name] || name.replace(/_/g, ' ');
+        const detail = (t && (t.path || t.query || t.message)) || '';
+        const failed = t && t.success === false;
+        return `<div class="ai-activity-row${failed ? ' fail' : ''}">` +
+            `<span class="ai-activity-dot"></span>` +
+            `<span class="ai-activity-name">${escapeHtml(label)}</span>` +
+            `<span class="ai-activity-detail">${escapeHtml(String(detail).slice(0, 64))}</span>` +
+            `<span class="ai-activity-state">${failed ? 'failed' : '✓'}</span>` +
+            `</div>`;
+    }).join('');
+    card.innerHTML =
+        `<button class="ai-activity-head" type="button">` +
+        `<svg class="ai-activity-chevron" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>` +
+        `<span class="ai-activity-title">Worked for ${secs}</span>` +
+        `<span class="ai-activity-count">${toolResults.length} tool${toolResults.length > 1 ? 's' : ''}${failCount ? ` · ${failCount} failed` : ''}</span>` +
+        `</button>` +
+        `<div class="ai-activity-body" hidden>${rows}</div>`;
+    card.querySelector('.ai-activity-head').addEventListener('click', () => {
+        const body = card.querySelector('.ai-activity-body');
+        body.hidden = !body.hidden;
+        card.classList.toggle('open', !body.hidden);
+    });
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+}
+
+// ============================================
+// Welcome screen with suggestion chips
+// ============================================
+function renderAIWelcome() {
+    const container = document.getElementById('aiMessages');
+    if (!container) return;
+    container.innerHTML = '';
+    const w = document.createElement('div');
+    w.className = 'ai-welcome-hero';
+    w.innerHTML =
+        `<div class="ai-welcome-logo"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12h4l3-8 4 16 3-8h6"/></svg></div>` +
+        `<h3>What are we building?</h3>` +
+        `<p>The agent can write code, read your whole project, compile, flash and watch serial output.</p>` +
+        `<div class="ai-suggestions">` +
+        `<button class="ai-suggestion" data-q="Blink an LED on pin 13 and explain the wiring">Blink an LED</button>` +
+        `<button class="ai-suggestion" data-q="Explain what this sketch does, step by step">Explain this sketch</button>` +
+        `<button class="ai-suggestion" data-q="Compile the sketch and fix any errors you find">Compile &amp; fix errors</button>` +
+        `<button class="ai-suggestion" data-q="List the files in this project and summarise the structure">Explore my project</button>` +
+        `</div>`;
+    container.appendChild(w);
+    w.querySelectorAll('.ai-suggestion').forEach(b => b.addEventListener('click', () => {
+        const input = document.getElementById('aiInput');
+        if (input) input.value = b.dataset.q;
+        sendAIMessage();
+    }));
+}
+
+// ─────────────────────────────────────────────
+// @-mention picker: type @ to insert a workspace-relative file path.
+// Context (open file, board, port, workspace root) is passed silently in
+// sendAIMessage — no visible chip row needed.
+// ─────────────────────────────────────────────
+let _mentionFiles = null;
+const mention = { open: false, atIdx: -1, matches: [], selected: 0 };
+
+function invalidateMentionCache() { _mentionFiles = null; }
+
+async function loadMentionFiles() {
+    if (_mentionFiles) return _mentionFiles;
+    try {
+        const res = await window.electronAPI.workspace.listFiles();
+        _mentionFiles = res?.success && Array.isArray(res.entries) ? res.entries : [];
+    } catch (_) { _mentionFiles = []; }
+    return _mentionFiles;
+}
+
+function setupMentionPicker() {
+    const input = document.getElementById('aiInput');
+    if (!input) return;
+    input.addEventListener('input', onMentionInput);
+    input.addEventListener('keydown', onMentionKeydown, true);
+    input.addEventListener('blur', () => setTimeout(closeMention, 120));
+}
+
+// ─────────────────────────────────────────────
+// Slash commands — /fix, /explain, /wire, /verify, /help
+// Triggered by typing "/" at the very start of the composer.
+// ─────────────────────────────────────────────
+const SLASH_COMMANDS = [
+    { cmd: 'fix', desc: 'Fix the last compile error', template: 'Read the last compile error and fix the current sketch.' },
+    { cmd: 'explain', desc: 'Explain the selected code', template: 'Explain the selected code step by step. If nothing is selected, explain the current sketch.' },
+    { cmd: 'wire', desc: 'Wire a component',
+      template: 'Help me wire a ', cursorAtEnd: true },
+    { cmd: 'verify', desc: 'Compile, upload, verify on hardware',
+      template: 'Add a Serial.println("Ready") at startup if not already present, compile, upload, then call verify_serial with "Ready" as the expected string.' },
+    { cmd: 'help', desc: 'Show available commands', special: 'help' }
+];
+const slash = { open: false, matches: [], selected: 0 };
+
+function setupSlashPicker() {
+    const input = document.getElementById('aiInput');
+    if (!input) return;
+    input.addEventListener('input', onSlashInput);
+    input.addEventListener('keydown', onSlashKeydown, true);
+    input.addEventListener('blur', () => setTimeout(closeSlash, 120));
+}
+
+function onSlashInput(e) {
+    const input = e.target;
+    const val = input.value;
+    // Only trigger when "/" is at position 0 and cursor is in the command range
+    if (val[0] !== '/') return closeSlash();
+    const spaceIdx = val.indexOf(' ');
+    const cmdEnd = spaceIdx === -1 ? val.length : spaceIdx;
+    if (input.selectionStart > cmdEnd) return closeSlash();
+    const query = val.slice(1, cmdEnd).toLowerCase();
+    const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(query));
+    if (matches.length === 0) return closeSlash();
+    slash.open = true;
+    slash.matches = matches;
+    slash.selected = Math.min(slash.selected, matches.length - 1);
+    renderSlashPopup();
+}
+
+function renderSlashPopup() {
+    let popup = document.getElementById('slashPopup');
+    if (!popup) {
+        popup = document.createElement('div');
+        popup.id = 'slashPopup';
+        popup.className = 'mention-popup';
+        document.querySelector('.ai-composer')?.appendChild(popup);
+    }
+    popup.innerHTML = slash.matches.map((m, i) =>
+        `<div class="mention-item${i === slash.selected ? ' active' : ''}" data-idx="${i}">` +
+        `<span class="mention-kind">/${escapeHtml(m.cmd)}</span>` +
+        `<span class="mention-path">${escapeHtml(m.desc)}</span>` +
+        `</div>`
+    ).join('');
+    popup.querySelectorAll('.mention-item').forEach(el => {
+        el.addEventListener('mousedown', (ev) => { ev.preventDefault(); acceptSlash(parseInt(el.dataset.idx, 10)); });
+    });
+}
+
+function onSlashKeydown(e) {
+    if (!slash.open) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSlash(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); slash.selected = Math.min(slash.selected + 1, slash.matches.length - 1); renderSlashPopup(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); slash.selected = Math.max(slash.selected - 1, 0); renderSlashPopup(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); acceptSlash(slash.selected); }
+}
+
+function acceptSlash(idx) {
+    const input = document.getElementById('aiInput');
+    const c = slash.matches[idx];
+    if (!input || !c) return closeSlash();
+    if (c.special === 'help') {
+        closeSlash();
+        input.value = '';
+        const lines = SLASH_COMMANDS.map(x => `<code>/${x.cmd}</code> — ${escapeHtml(x.desc)}`).join('<br>');
+        addAIMessage('assistant',
+            `<b>Slash commands</b><br>${lines}<br><br>Type <code>/</code> at the start of the composer to open the picker.`,
+            false, true);
+        return;
+    }
+    // Replace the whole /cmd prefix with the template body
+    const currentVal = input.value;
+    const spaceIdx = currentVal.indexOf(' ');
+    const rest = spaceIdx === -1 ? '' : currentVal.slice(spaceIdx + 1);
+    input.value = c.template + rest;
+    // Place cursor at end of template (before any residual text)
+    const pos = c.template.length;
+    input.setSelectionRange(pos, pos);
+    closeSlash();
+    input.focus();
+}
+
+function closeSlash() {
+    slash.open = false;
+    slash.matches = [];
+    document.getElementById('slashPopup')?.remove();
+}
+
+async function onMentionInput(e) {
+    const input = e.target;
+    const pos = input.selectionStart;
+    const before = input.value.slice(0, pos);
+    const at = before.lastIndexOf('@');
+    if (at < 0) return closeMention();
+    const prev = at > 0 ? before[at - 1] : ' ';
+    if (prev !== ' ' && prev !== '\n' && at !== 0) return closeMention();
+    const query = before.slice(at + 1);
+    if (/\s/.test(query)) return closeMention();
+    const entries = await loadMentionFiles();
+    const q = query.toLowerCase();
+    const matches = (q ? entries.filter(x => x.rel.toLowerCase().includes(q)) : entries).slice(0, 12);
+    if (matches.length === 0) return closeMention();
+    mention.open = true;
+    mention.atIdx = at;
+    mention.matches = matches;
+    mention.selected = Math.min(mention.selected, matches.length - 1);
+    renderMentionPopup();
+}
+
+function renderMentionPopup() {
+    let popup = document.getElementById('mentionPopup');
+    if (!popup) {
+        popup = document.createElement('div');
+        popup.id = 'mentionPopup';
+        popup.className = 'mention-popup';
+        document.querySelector('.ai-composer')?.appendChild(popup);
+    }
+    popup.innerHTML = mention.matches.map((m, i) =>
+        `<div class="mention-item${i === mention.selected ? ' active' : ''}" data-idx="${i}">` +
+        `<span class="mention-kind">${m.isDir ? 'DIR' : 'FILE'}</span>` +
+        `<span class="mention-path">${escapeHtml(m.rel)}</span>` +
+        `</div>`
+    ).join('');
+    popup.querySelectorAll('.mention-item').forEach(el => {
+        el.addEventListener('mousedown', (ev) => { ev.preventDefault(); acceptMention(parseInt(el.dataset.idx, 10)); });
+    });
+}
+
+function onMentionKeydown(e) {
+    if (!mention.open) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMention(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); mention.selected = Math.min(mention.selected + 1, mention.matches.length - 1); renderMentionPopup(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); mention.selected = Math.max(mention.selected - 1, 0); renderMentionPopup(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); acceptMention(mention.selected); }
+}
+
+function acceptMention(idx) {
+    const input = document.getElementById('aiInput');
+    const m = mention.matches[idx];
+    if (!input || !m) return closeMention();
+    const pos = input.selectionStart;
+    const text = input.value;
+    const insert = '@' + m.rel + ' ';
+    input.value = text.slice(0, mention.atIdx) + insert + text.slice(pos);
+    const newPos = mention.atIdx + insert.length;
+    input.setSelectionRange(newPos, newPos);
+    closeMention();
+    input.focus();
+}
+
+function closeMention() {
+    mention.open = false;
+    mention.atIdx = -1;
+    mention.matches = [];
+    document.getElementById('mentionPopup')?.remove();
+}
+
+function setupAgentPanelExtras() {
+    // Live tool-activity stream from the agent loop
+    if (window.electronAPI.ai?.onToolEvent) {
+        window.electronAPI.ai.onToolEvent(onLiveToolEvent);
+    }
+    if (window.electronAPI.ai?.onPendingEdit) {
+        window.electronAPI.ai.onPendingEdit(showPendingEditModal);
+    }
+    if (window.electronAPI.ai?.onTextChunk) {
+        window.electronAPI.ai.onTextChunk(onStreamChunk);
+    }
+    setupMentionPicker();
+    setupSlashPicker();
+    setupAttachmentInputs();
+
+    document.getElementById('aiNewChatBtn')?.addEventListener('click', startNewChat);
+    document.getElementById('aiHistoryBtn')?.addEventListener('click', () => {
+        const panel = document.getElementById('aiHistoryPanel');
+        if (panel && !panel.hidden) closeChatHistory();
+        else openChatHistory();
+    });
+    document.getElementById('aiHistoryClose')?.addEventListener('click', closeChatHistory);
+    document.getElementById('aiAccountBtn')?.addEventListener('click', async () => {
+        if (!state.authUser) return;
+        if (confirm(`Sign out of Impulse?\n\n${state.authUser.name} (${state.authUser.email})`)) {
+            await window.electronAPI.auth.signOut();
+            state.authUser = null;
+            updateAccountBadge();
+            const overlay = document.getElementById('loginOverlay');
+            const status = await window.electronAPI.auth.status();
+            if (overlay && status.configured) {
+                overlay.hidden = false;
+                document.getElementById('loginGoogleBtn')?.removeAttribute('disabled');
+            }
+        }
+    });
+    // First-run welcome
+    const container = document.getElementById('aiMessages');
+    if (container && !container.children.length) renderAIWelcome();
+}
+
 async function sendAIMessage() {
     const input = document.getElementById('aiInput');
     const message = input?.value?.trim();
 
     if (!message) return;
+    // One turn at a time — the main-process agent shares one history/cancel flag.
+    if (state.aiTurnRunning) return;
 
     if (!state.aiProviderConfigured) {
         addAIMessage('assistant', 'Please select a model and enter your API key first.');
@@ -3663,46 +4478,65 @@ async function sendAIMessage() {
 
     addAIMessage('user', message, false, false, snapId);
     input.value = '';
+    persistChatMessage('user', message);
+    const turnStart = Date.now();
 
-    const thinkingId = addAIMessage('assistant', '<span class="shimmer-text">Thinking…</span>', true, true);
+    // Live turn trace: tools stream into this card as the agent works.
+    beginLiveTurn();
+    clearStreamedMessage(); // clean slate for a new turn
+    setSendBtnStopMode(true);
 
-    const safeRemoveThinking = () => {
-        try {
-            removeAIMessage(thinkingId);
-        } catch (e) {
-            console.error('Error removing thinking message:', e);
-        }
-    };
-
+    // Safety net, not a deadline: agent turns (compile + upload + hardware
+    // verify) legitimately run for minutes. On fire, actually stop the
+    // main-process agent and ignore whatever it eventually resolves with.
+    let timedOut = false;
     const timeoutId = setTimeout(() => {
-        safeRemoveThinking();
-        addAIMessage('assistant', 'Request timed out. Please try again.');
-    }, 120000);
+        timedOut = true;
+        window.electronAPI.ai.cancel?.().catch(() => {});
+        cancelLiveTurn();
+        clearStreamedMessage();
+        addAIMessage('assistant', 'Request timed out after 20 minutes and was cancelled.');
+        setSendBtnStopMode(false);
+    }, 1200000); // 20 min: a single turn may cold-compile (up to 10m) AND upload AND verify
 
     try {
+        const selection = state.editor ? state.editor.getSelection() : '';
         const context = {
             code: hasFileOpen && state.editor ? state.editor.getValue() : '',
             sketchPath: state.currentSketch || null,
             board: document.getElementById('boardSelectSidebar')?.value,
             port: document.getElementById('portSelectSidebar')?.value,
-            hasFileOpen: hasFileOpen
+            hasFileOpen: !!hasFileOpen,
+            autoVerify: !!state.autoVerify,
+            editorSelection: selection && selection.length > 0 ? selection : null
         };
         const mode = state.aiMode || 'agent';
-        const result = await window.electronAPI.ai.processQuery(message, context, mode);
+        const attachmentsForCall = attached.map(a => ({ mimeType: a.mimeType, data: a.data }));
+        clearAttachments();
+        const result = await window.electronAPI.ai.processQuery(message, context, mode, attachmentsForCall);
 
         clearTimeout(timeoutId);
-        safeRemoveThinking();
+        if (timedOut) return; // turn already reported as timed out — drop the late result
 
         if (result.success && result.data) {
             const response = result.data.response || result.data.content || 'No response received';
-            addAIMessage('assistant', response);
 
-            if (result.data.toolResults && result.data.toolResults.length > 0) {
-                const toolSummary = result.data.toolResults
-                    .map(t => `• ${t.tool || 'Action'}: ${t.success ? 'Success' : 'Failed'}`)
-                    .join('\n');
-                addAIMessage('system', `Actions performed:\n${toolSummary}`);
+            // Trace first (chronological: agent worked, then answered)
+            finalizeLiveTurn(Date.now() - turnStart, result.data.toolResults);
+            // If the response streamed in, promote the streaming node to the final
+            // formatted message. Otherwise fall through to a fresh addAIMessage.
+            if (!finalizeStreamedMessage(response)) {
+                addAIMessage('assistant', response);
             }
+            attachFeedbackButtons({
+                prompt: message,
+                response,
+                model: result.data.model || document.getElementById('aiModelSelect')?.value || null,
+                tools: (result.data.toolResults || []).map(t => t.tool).filter(Boolean),
+                board: document.getElementById('boardSelectSidebar')?.value || null
+            });
+            persistChatMessage('assistant', response,
+                result.data.toolResults?.map(t => ({ tool: t.tool, ok: t.success !== false })) || undefined);
 
             // Track token usage and auto-compact when approaching context limits.
             if (result.data.usage) {
@@ -3714,25 +4548,343 @@ async function sendAIMessage() {
                 }
             }
         } else {
+            cancelLiveTurn();
+            clearStreamedMessage();
             const errorMsg = result.error || 'Unknown error occurred';
             addAIMessage('assistant', `Error: ${errorMsg}`);
             logToConsole(`AI Error: ${errorMsg}`, 'error');
         }
     } catch (error) {
         clearTimeout(timeoutId);
-        safeRemoveThinking();
+        if (timedOut) return;
+        cancelLiveTurn();
+        clearStreamedMessage();
 
         const errorMsg = error.message || 'An unexpected error occurred';
         addAIMessage('assistant', `Error: ${errorMsg}`);
         logToConsole(`AI Error: ${errorMsg}`, 'error');
+    } finally {
+        setSendBtnStopMode(false);
     }
+}
+
+// ─────────────────────────────────────────────
+// Text streaming — assistant tokens grow live in the panel
+// ─────────────────────────────────────────────
+let _streamNode = null;
+let _streamBuffer = '';
+
+function beginStreamMessage() {
+    const container = document.getElementById('aiMessages');
+    if (!container) return;
+    const welcome = container.querySelector('.ai-welcome, .ai-welcome-hero');
+    if (welcome) welcome.remove();
+    _streamNode = document.createElement('div');
+    _streamNode.className = 'ai-message assistant streaming';
+    // Raw text with pre-wrap while streaming; replaced with formatted HTML on finalize.
+    const body = document.createElement('div');
+    body.className = 'ai-stream-body';
+    _streamNode.appendChild(body);
+    container.appendChild(_streamNode);
+    container.scrollTop = container.scrollHeight;
+    _streamBuffer = '';
+}
+
+function onStreamChunk(delta) {
+    if (!delta?.text) return;
+    if (!_streamNode) beginStreamMessage();
+    _streamBuffer += delta.text;
+    const body = _streamNode.querySelector('.ai-stream-body');
+    if (body) body.textContent = _streamBuffer;
+    const container = document.getElementById('aiMessages');
+    if (container) container.scrollTop = container.scrollHeight;
+}
+
+// Called from sendAIMessage before addAIMessage('assistant', ...) — if we
+// streamed, replace the live node with the final formatted content instead of
+// adding a fresh message. Returns true if it consumed the finalize.
+function finalizeStreamedMessage(finalContent) {
+    if (!_streamNode) return false;
+    _streamNode.classList.remove('streaming');
+    _streamNode.innerHTML = formatAIContent(finalContent || _streamBuffer || '');
+    _streamNode = null;
+    _streamBuffer = '';
+    return true;
+}
+
+function clearStreamedMessage() {
+    if (_streamNode) _streamNode.remove();
+    _streamNode = null;
+    _streamBuffer = '';
+}
+
+// ─────────────────────────────────────────────
+// Pending-edit modal — Accept/Reject before agent writes to editor
+// ─────────────────────────────────────────────
+
+// Line diff via LCS. O(N*M) memory; capped below at 2000 lines per side.
+function computeLineDiff(a, b) {
+    const A = a.split('\n'), B = b.split('\n');
+    const CAP = 2000;
+    if (A.length > CAP || B.length > CAP) {
+        // ponytail: fall back to naive full-replace view. Upgrade to Myers if hit often.
+        return [
+            ...A.map(line => ({ type: '-', line })),
+            ...B.map(line => ({ type: '+', line }))
+        ];
+    }
+    const m = A.length, n = B.length;
+    const dp = new Array(m + 1);
+    for (let i = 0; i <= m; i++) dp[i] = new Int32Array(n + 1);
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+    const out = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+        if (A[i] === B[j]) { out.push({ type: ' ', line: A[i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: '-', line: A[i] }); i++; }
+        else { out.push({ type: '+', line: B[j] }); j++; }
+    }
+    while (i < m) out.push({ type: '-', line: A[i++] });
+    while (j < n) out.push({ type: '+', line: B[j++] });
+    return out;
+}
+
+function showPendingEditModal({ id, before, after, filepath, dismissAll }) {
+    const existing = document.getElementById('pendingEditModal');
+    if (existing) existing.remove();
+    // Turn was cancelled — main already rejected all pending edits.
+    if (dismissAll) return;
+
+    const diff = computeLineDiff(before || '', after || '');
+    const added = diff.filter(d => d.type === '+').length;
+    const removed = diff.filter(d => d.type === '-').length;
+
+    const rows = diff.map(d => {
+        const cls = d.type === '+' ? 'add' : d.type === '-' ? 'del' : 'ctx';
+        const prefix = d.type === '+' ? '+' : d.type === '-' ? '-' : ' ';
+        return `<div class="dm-row ${cls}"><span class="dm-prefix">${prefix}</span><span class="dm-line">${escapeHtml(d.line)}</span></div>`;
+    }).join('');
+
+    const modal = document.createElement('div');
+    modal.id = 'pendingEditModal';
+    modal.className = 'diff-modal';
+    modal.innerHTML =
+        '<div class="diff-modal-panel">' +
+            '<div class="diff-modal-header">' +
+                '<div class="diff-modal-title">Review agent edit' + (filepath ? ` · ${escapeHtml(filepath)}` : '') + '</div>' +
+                `<div class="diff-modal-stats"><span class="dm-stat add">+${added}</span> <span class="dm-stat del">-${removed}</span></div>` +
+            '</div>' +
+            `<div class="diff-modal-body">${rows || '<div class="dm-row ctx"><span class="dm-prefix"> </span><span class="dm-line">(no visible change)</span></div>'}</div>` +
+            '<div class="diff-modal-footer">' +
+                '<button class="diff-modal-btn reject" id="dmReject">Reject</button>' +
+                '<button class="diff-modal-btn accept" id="dmAccept">Accept</button>' +
+            '</div>' +
+        '</div>';
+    document.body.appendChild(modal);
+
+    const finish = (accepted) => {
+        try { window.electronAPI.ai.decidePendingEdit(id, accepted); } catch (_) { /* main-side dead */ }
+        modal.remove();
+    };
+    modal.querySelector('#dmAccept').addEventListener('click', () => finish(true));
+    modal.querySelector('#dmReject').addEventListener('click', () => finish(false));
+    modal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') finish(false);
+        else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) finish(true);
+    });
+    setTimeout(() => modal.querySelector('#dmAccept')?.focus(), 0);
+}
+
+// ─────────────────────────────────────────────
+// Image attachments — B17
+// Paste (Ctrl+V) or drop into the composer to attach. Cap 4 × 6MB raw
+// (~8MB after base64 — matches the main-process handler's 8M char cap).
+// ─────────────────────────────────────────────
+const attached = []; // [{ mimeType, data, previewUrl, name }]
+const MAX_ATTACHMENTS = 4;
+const MAX_ATTACH_BYTES = 6 * 1024 * 1024; // pre-base64 raw
+
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+            const dataUrl = r.result;
+            const comma = dataUrl.indexOf(',');
+            resolve(comma > 0 ? dataUrl.slice(comma + 1) : '');
+        };
+        r.onerror = reject;
+        r.readAsDataURL(file);
+    });
+}
+
+async function addAttachmentFromFile(file) {
+    if (!file || !file.type?.startsWith('image/')) return;
+    if (attached.length >= MAX_ATTACHMENTS) {
+        logToConsole(`Max ${MAX_ATTACHMENTS} attachments reached.`, 'warn');
+        return;
+    }
+    if (file.size > MAX_ATTACH_BYTES) {
+        logToConsole(`Image too large (${Math.round(file.size / 1024)}KB, cap ${MAX_ATTACH_BYTES / 1024}KB).`, 'warn');
+        return;
+    }
+    const data = await fileToBase64(file);
+    if (!data) return;
+    attached.push({
+        mimeType: file.type,
+        data,
+        previewUrl: `data:${file.type};base64,${data}`,
+        name: file.name || 'pasted-image'
+    });
+    renderAttachments();
+}
+
+function renderAttachments() {
+    let wrap = document.getElementById('aiAttachments');
+    if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'aiAttachments';
+        wrap.className = 'ai-attachments';
+        const composer = document.querySelector('.ai-composer');
+        composer?.insertBefore(wrap, composer.firstChild);
+    }
+    if (attached.length === 0) { wrap.remove(); return; }
+    wrap.innerHTML = attached.map((a, i) =>
+        `<div class="ai-attach">` +
+        `<img src="${a.previewUrl}" alt="${escapeHtml(a.name)}" />` +
+        `<button class="ai-attach-x" data-idx="${i}" title="Remove">×</button>` +
+        `</div>`
+    ).join('');
+    wrap.querySelectorAll('.ai-attach-x').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const idx = parseInt(e.currentTarget.dataset.idx, 10);
+            attached.splice(idx, 1);
+            renderAttachments();
+        });
+    });
+}
+
+function clearAttachments() {
+    attached.length = 0;
+    document.getElementById('aiAttachments')?.remove();
+}
+
+function setupAttachmentInputs() {
+    const input = document.getElementById('aiInput');
+    if (!input) return;
+    input.addEventListener('paste', async (e) => {
+        const items = Array.from(e.clipboardData?.items || []);
+        const files = items.filter(it => it.kind === 'file' && it.type?.startsWith('image/')).map(it => it.getAsFile()).filter(Boolean);
+        if (files.length === 0) return;
+        e.preventDefault();
+        for (const f of files) await addAttachmentFromFile(f);
+    });
+    const composer = document.querySelector('.ai-composer');
+    if (composer) {
+        composer.addEventListener('dragover', (e) => { e.preventDefault(); composer.classList.add('drag-over'); });
+        composer.addEventListener('dragleave', () => composer.classList.remove('drag-over'));
+        composer.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            composer.classList.remove('drag-over');
+            const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type?.startsWith('image/'));
+            for (const f of files) await addAttachmentFromFile(f);
+        });
+    }
+}
+
+// ─────────────────────────────────────────────
+// Project rules editor (IMPULSE.md) — B18
+// ─────────────────────────────────────────────
+async function openRulesEditor() {
+    const res = await window.electronAPI.workspace.readRules();
+    if (!res?.success) {
+        addAIMessage('assistant', 'Open a project folder first to define rules.');
+        return;
+    }
+    const existing = document.getElementById('rulesModal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'rulesModal';
+    modal.className = 'diff-modal';
+    modal.innerHTML =
+        '<div class="diff-modal-panel rules-modal-panel">' +
+            '<div class="diff-modal-header">' +
+                '<div class="diff-modal-title">IMPULSE.md · project rules</div>' +
+                '<div class="rules-hint">Prepended to the agent\'s system prompt on every turn.</div>' +
+            '</div>' +
+            '<textarea id="rulesTextarea" class="rules-textarea" spellcheck="false" placeholder="# Project rules\n\n- Use tabs for indentation.\n- All I2C sensors go on Wire1.\n- Comment every ISR."></textarea>' +
+            '<div class="diff-modal-footer">' +
+                '<button class="diff-modal-btn reject" id="rulesCancel">Cancel</button>' +
+                '<button class="diff-modal-btn accept" id="rulesSave">Save</button>' +
+            '</div>' +
+        '</div>';
+    document.body.appendChild(modal);
+
+    const ta = modal.querySelector('#rulesTextarea');
+    ta.value = res.content || '';
+
+    const close = () => modal.remove();
+    modal.querySelector('#rulesCancel').addEventListener('click', close);
+    modal.querySelector('#rulesSave').addEventListener('click', async () => {
+        const save = await window.electronAPI.workspace.writeRules(ta.value);
+        if (save?.success) {
+            close();
+            logToConsole('Project rules saved to IMPULSE.md', 'info');
+        } else {
+            logToConsole(`Save failed: ${save?.error || 'unknown'}`, 'error');
+        }
+    });
+    modal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') close();
+        else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) modal.querySelector('#rulesSave').click();
+    });
+    setTimeout(() => ta.focus(), 0);
+}
+
+// Attach 👍/👎 buttons to the last assistant message. Silent log — no UI toast.
+function attachFeedbackButtons(payload) {
+    const container = document.getElementById('aiMessages');
+    const msg = container?.lastElementChild;
+    if (!msg || !msg.classList.contains('assistant')) return;
+    const bar = document.createElement('div');
+    bar.className = 'msg-feedback';
+    bar.innerHTML =
+        '<button class="msg-fb up" title="Helpful">👍</button>' +
+        '<button class="msg-fb down" title="Not helpful">👎</button>';
+    const rate = async (rating, btn) => {
+        if (msg.dataset.rated) return;
+        msg.dataset.rated = rating;
+        bar.querySelectorAll('.msg-fb').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        try { await window.electronAPI.ai.recordFeedback({ ...payload, rating }); }
+        catch (_) { /* silent */ }
+    };
+    bar.querySelector('.up').addEventListener('click', (e) => rate('up', e.currentTarget));
+    bar.querySelector('.down').addEventListener('click', (e) => rate('down', e.currentTarget));
+    msg.appendChild(bar);
+}
+
+// Toggle the send button between "send" (arrow) and "stop" (square) modes.
+function setSendBtnStopMode(stopping) {
+    state.aiTurnRunning = !!stopping;
+    const btn = document.getElementById('aiSend');
+    if (!btn) return;
+    btn.classList.toggle('stopping', !!stopping);
+    btn.title = stopping ? 'Stop (Esc)' : 'Send (Enter)';
+    btn.innerHTML = stopping
+        ? '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>';
 }
 
 function addAIMessage(role, content, isTemporary = false, isRawHtml = false, snapshotId = null) {
     const container = document.getElementById('aiMessages');
     if (!container) return null;
 
-    const welcome = container.querySelector('.ai-welcome');
+    const welcome = container.querySelector('.ai-welcome, .ai-welcome-hero');
     if (welcome) welcome.remove();
 
     const messageDiv = document.createElement('div');
@@ -3960,11 +5112,9 @@ function updateTokenCounter() {
 function clearChatUI() {
     const container = document.getElementById('aiMessages');
     if (!container) return;
-    container.innerHTML = '';
-    const welcome = document.createElement('div');
-    welcome.className = 'ai-welcome';
-    welcome.textContent = 'Chat cleared. Context window still active — use compact to reset it.';
-    container.appendChild(welcome);
+    renderAIWelcome();
+    updateAIStatus('Chat cleared — context window still active. Use compact to reset it.');
+    setTimeout(() => updateAIStatus(''), 4000);
 }
 
 // ============================================
@@ -4347,6 +5497,21 @@ function updateBoardPortDisplay(boardName, port) {
             display.textContent = 'Select Board and Port';
         }
     }
+    state.footerBoard = boardName || null;
+    state.footerPort = port || null;
+    updateFooterStatus();
+}
+
+// Status-bar telemetry: instrument readout in the footer (CLI · board · port)
+function updateFooterStatus() {
+    const el = document.querySelector('.footer-left');
+    if (!el) return;
+    const parts = [];
+    parts.push(state.cliInstalled ? 'CLI READY' : 'CLI OFFLINE');
+    if (state.footerBoard) parts.push(state.footerBoard);
+    if (state.footerPort) parts.push(state.footerPort);
+    el.innerHTML = `<span class="footer-led${state.cliInstalled ? ' on' : ''}"></span>` +
+        parts.map(p => `<span class="footer-seg">${escapeHtml(p)}</span>`).join('<span class="footer-sep">·</span>');
 }
 
 // ============================================

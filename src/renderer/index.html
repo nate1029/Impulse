@@ -13,7 +13,7 @@
     <!-- Critical CSS: applied before the JS-imported bundle to prevent a flash of
          unstyled elements (skip-link, resize handles) on every boot. -->
     <style>
-        html, body { margin: 0; background: #0a0a0a; }
+        html, body { margin: 0; background: #131211; }
         .skip-link { position: absolute; left: -9999px; top: auto; z-index: 10000; }
         .skip-link:focus { left: 0; top: 0; }
         .ai-panel-overlay:not(.open) { width: 0 !important; overflow: hidden; }
@@ -25,18 +25,41 @@
 <body>
     <a href="#arduinoWorkspace" class="skip-link">Skip to editor</a>
     <div class="app-container" role="application" aria-label="Impulse IDE">
+        <!-- Custom titlebar (frameless window): app mark · menus · window controls -->
+        <div id="titlebar" class="titlebar">
+            <div class="titlebar-app">
+                <svg class="titlebar-mark" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2 12h4l3-8 4 16 3-8h6" />
+                </svg>
+                <span class="titlebar-name">IMPULSE</span>
+            </div>
+            <nav id="titlebarMenus" class="titlebar-menus" aria-label="Application menu"></nav>
+            <div class="titlebar-spacer"></div>
+            <div class="titlebar-controls">
+                <button id="winMinBtn" class="titlebar-ctrl" title="Minimize" aria-label="Minimize">
+                    <svg viewBox="0 0 12 12" width="12" height="12" stroke="currentColor" stroke-width="1"><line x1="1" y1="6" x2="11" y2="6"/></svg>
+                </button>
+                <button id="winMaxBtn" class="titlebar-ctrl" title="Maximize" aria-label="Maximize">
+                    <svg class="ico-max" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1"><rect x="1.5" y="1.5" width="9" height="9"/></svg>
+                    <svg class="ico-restore" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1"><rect x="1.5" y="3.5" width="7" height="7"/><polyline points="3.5 3.5 3.5 1.5 10.5 1.5 10.5 8.5 8.5 8.5"/></svg>
+                </button>
+                <button id="winCloseBtn" class="titlebar-ctrl close" title="Close" aria-label="Close">
+                    <svg viewBox="0 0 12 12" width="12" height="12" stroke="currentColor" stroke-width="1"><line x1="1.5" y1="1.5" x2="10.5" y2="10.5"/><line x1="10.5" y1="1.5" x2="1.5" y2="10.5"/></svg>
+                </button>
+            </div>
+        </div>
         <!-- Top Row: Tool strip (extreme left) + Menu bar -->
         <header class="top-row">
             <div class="tool-strip">
                 <button id="compileBtn" class="action-btn verify" title="Verify (Ctrl+R)">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                        stroke-width="2.5">
+                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="20 6 9 17 4 12" />
                     </svg>
                 </button>
                 <button id="uploadBtn" class="action-btn upload" title="Upload (Ctrl+U)">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                        stroke-width="2.5">
+                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M5 12l7-7 7 7M12 5v14" />
                     </svg>
                 </button>
@@ -541,13 +564,28 @@
             <div class="ai-resize-handle" id="aiResizeHandle" title="Drag to resize"></div>
             <div class="ai-panel-inner">
                 <div class="ai-panel-header">
-                    <span class="ai-panel-title">AI Assistant</span>
+                    <span class="ai-panel-title">Agent</span>
+                    <span id="aiSessionTitle" class="ai-session-title" title=""></span>
                     <div class="ai-panel-header-actions">
+                        <button id="aiAccountBtn" class="ai-account-btn" hidden></button>
                         <span id="aiTokenCounter" class="ai-token-counter" title="Tokens used this session (auto-compacts at 70k)"></span>
-                        <button id="aiCompactBtn" class="ai-panel-header-btn" title="Compact conversation (summarise and clear context)">
+                        <button id="aiNewChatBtn" class="ai-panel-header-btn" title="New chat">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M8 6h13M8 12h8M8 18h5"/>
-                                <path d="M3 6l1 1-1 1M3 12l1 1-1 1"/>
+                                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                        <button id="aiHistoryBtn" class="ai-panel-header-btn" title="Chat history">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>
+                            </svg>
+                        </button>
+
+                        <button id="aiRulesBtn" class="ai-panel-header-btn" title="Edit project rules (IMPULSE.md)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                                <line x1="8" y1="13" x2="16" y2="13"/>
+                                <line x1="8" y1="17" x2="13" y2="17"/>
                             </svg>
                         </button>
                         <button id="aiClearBtn" class="ai-panel-header-btn" title="Clear chat (keeps context)">
@@ -565,21 +603,28 @@
                     </div>
                 </div>
                 <div id="aiMessages" class="ai-msg-area"></div>
-                <div class="ai-composer">
-                    <textarea id="aiInput" placeholder="Plan, @ for context, / for commands" rows="2"></textarea>
-                    <div class="ai-composer-row">
-                        <span class="ai-mode-wrap">
-                            <svg class="ai-mode-ico" viewBox="0 0 24 24" width="12" height="12" fill="none"
-                                stroke="currentColor" stroke-width="2">
-                                <path
-                                    d="M4 12c0-2 2-4 4-4s4 2 4 4-2 4-4 4-4-2-4-4zm8 0c0-2 2-4 4-4s4 2 4 4-2 4-4 4-4-2-4-4" />
+                <div id="aiHistoryPanel" class="ai-history-panel" hidden>
+                    <div class="ai-history-head">
+                        <span>Chat history</span>
+                        <button id="aiHistoryClose" class="ai-panel-header-btn" title="Back to chat">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                             </svg>
-                            <select id="aiModeSelect" class="ai-mode-select" title="Mode">
-                                <option value="agent">Agent</option>
-                                <option value="ask">Ask</option>
-                                <option value="debug">Debug</option>
-                            </select>
-                        </span>
+                        </button>
+                    </div>
+                    <div id="aiHistoryList" class="ai-history-list"></div>
+                </div>
+                <div class="ai-composer">
+                    <textarea id="aiInput" placeholder="Ask the agent to build, fix or flash… (@ for files, / for commands)" rows="2"></textarea>
+                    <div class="ai-composer-row">
+                        <div id="aiModeSeg" class="ai-mode-seg" role="group" aria-label="Agent mode">
+                            <button type="button" class="ai-mode-pill active" data-mode="agent" title="Full agent — reads, writes, compiles, flashes">Agent</button>
+                            <button type="button" class="ai-mode-pill" data-mode="ask" title="Q&A only — never touches your code">Ask</button>
+                            <button type="button" class="ai-mode-pill" data-mode="debug" title="Error analysis and fixes">Debug</button>
+                        </div>
+                        <button type="button" id="aiVerifyToggle" class="ai-verify-toggle" title="Auto-verify on hardware: after each upload, connect serial and confirm the code actually runs. Retries on fail.">
+                            <span class="dot"></span>Verify
+                        </button>
                         <select id="aiModelSelect" class="ai-model-select" title="Model">
                             <option value="">Model…</option>
                         </select>
@@ -598,24 +643,11 @@
                                     <path
                                         d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-1.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h1.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v1.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-1.09a1.65 1.65 0 00-1.51 1z" />
                                 </svg></button>
-                            <button type="button" class="ai-ico" title="Image" disabled aria-hidden="true"><svg
-                                    viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-                                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                                    <circle cx="8.5" cy="8.5" r="1.5" />
-                                    <path d="M21 15l-5-5L5 21" />
-                                </svg></button>
-                            <button type="button" class="ai-ico" title="Voice" disabled aria-hidden="true"><svg
-                                    viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-                                    <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
-                                    <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" />
-                                </svg></button>
-                            <button type="button" id="aiSend" class="ai-send" title="Send"><svg viewBox="0 0 24 24"
-                                    width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                            <button type="button" id="aiSend" class="ai-send" title="Send (Enter)"><svg viewBox="0 0 24 24"
+                                    width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"
                                     stroke-linecap="round" stroke-linejoin="round">
-                                    <line x1="22" y1="2" x2="11" y2="13" />
-                                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                                    <line x1="12" y1="19" x2="12" y2="5" />
+                                    <polyline points="5 12 12 5 19 12" />
                                 </svg></button>
                         </div>
                     </div>
@@ -647,7 +679,7 @@
                     title="Close">×</button>
             </div>
             <input type="text" id="examplesDropdownFilter" class="sidebar-input" placeholder="Filter by library...">
-            <button id="examplesDropdownLoad" class="btn-small" style="width: 100%; margin-top: 6px;">Load
+            <button id="examplesDropdownLoad" class="btn-small">Load
                 examples</button>
             <div id="examplesDropdownList" class="examples-dropdown-list"></div>
         </div>
@@ -683,6 +715,25 @@
             <div class="footer-left"></div>
             <div class="footer-right"></div>
         </footer>
+    </div>
+
+    <!-- Auth wall — shown until Google sign-in completes (when configured) -->
+    <div id="loginOverlay" class="login-overlay" hidden>
+        <div class="login-card">
+            <div class="login-logo">
+                <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <path d="M2 12h4l3-8 4 16 3-8h6"/>
+                </svg>
+            </div>
+            <h1>Impulse</h1>
+            <p class="login-tagline">The AI-native IDE for IoT &amp; embedded projects</p>
+            <button id="loginGoogleBtn" class="login-google-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z"/><path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15A11 11 0 0 0 12 1 11 11 0 0 0 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
+                Continue with Google
+            </button>
+            <p id="loginStatus" class="login-status"></p>
+            <p class="login-fineprint">Sign-in is used to identify who is using Impulse. Your code never leaves your machine.</p>
+        </div>
     </div>
 
     <!-- Single Vite entry point: bundles CodeMirror + all app scripts locally -->

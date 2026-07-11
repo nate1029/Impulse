@@ -125,6 +125,45 @@ const TOOL_SCHEMA = {
     }
   },
 
+  WEB_SEARCH: {
+    name: 'web_search',
+    description: 'Search the web for niche board/sensor/IC info NOT in the knowledge base. Use for obscure parts, cheap clones, unfamiliar chips, quirky pinouts, library bugs. Results are re-ranked so datasheets and vetted sources (Adafruit, SparkFun, Arduino forum, chip vendors) surface first. Returns { answer, results:[{title,url,snippet,source}] }. Cite the URL you used in your reply.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query. Be specific — include the part number, board name, or exact behaviour.' },
+        limit: { type: 'number', description: 'Max results, 1..10 (default 5)' }
+      },
+      required: ['query']
+    }
+  },
+
+  FETCH_URL: {
+    name: 'fetch_url',
+    description: 'Fetch a webpage as readable text. Use after web_search to read a promising result. Returns { title, text, truncated }. Content is capped at 20k chars.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full http(s) URL' }
+      },
+      required: ['url']
+    }
+  },
+
+  VERIFY_SERIAL: {
+    name: 'verify_serial',
+    description: 'Wait for expected output on the serial port to prove the sketch actually works on hardware. Use after upload_sketch to close the loop: pick a short, distinctive substring you know will appear (e.g. "Sensor OK", "Ready", or a value pattern). Returns { passed, matchedLine, elapsedMs, sampledLines } within timeoutMs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        expected: { type: 'string', description: 'Substring or regex to match on any serial line' },
+        timeoutMs: { type: 'number', description: 'How long to wait, 500..30000 (default 8000)' },
+        isRegex: { type: 'boolean', description: 'Treat expected as a regex (default false)' }
+      },
+      required: ['expected']
+    }
+  },
+
   AUTO_DETECT_BAUD: {
     name: 'auto_detect_baud',
     description: 'Automatically detect the correct baud rate for a serial port',
@@ -357,6 +396,71 @@ const TOOL_SCHEMA = {
     }
   },
 
+  // ---- Workspace / filesystem (whole project) ----
+  READ_FILE: {
+    name: 'read_file',
+    description: 'Read any text file in the open project by workspace-relative path (e.g. "src/main.ino"). Use this to inspect files other than the one on screen before editing.',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Workspace-relative file path' } },
+      required: ['path']
+    }
+  },
+  WRITE_FILE: {
+    name: 'write_file',
+    description: 'Create or overwrite a file in the project with the given content. Prefer editing the active editor via edit_code for the open sketch; use write_file for OTHER files. Always read_file first if unsure of current contents.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path' },
+        content: { type: 'string', description: 'Full new file content' }
+      },
+      required: ['path', 'content']
+    }
+  },
+  CREATE_FILE: {
+    name: 'create_file',
+    description: 'Create a NEW file. Fails if the file already exists (use write_file to overwrite).',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path' },
+        content: { type: 'string', description: 'Initial file content' }
+      },
+      required: ['path']
+    }
+  },
+  LIST_DIRECTORY: {
+    name: 'list_directory',
+    description: 'List files and subfolders of a directory in the project (default: project root).',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Workspace-relative directory path. Omit for root.' } },
+      required: []
+    }
+  },
+  GET_PROJECT_TREE: {
+    name: 'get_project_tree',
+    description: 'Get a compact tree of the whole project structure. Use once at the start to orient yourself.',
+    parameters: {
+      type: 'object',
+      properties: { maxDepth: { type: 'number', description: 'Max depth (default 3)' } },
+      required: []
+    }
+  },
+  SEARCH_FILES: {
+    name: 'search_files',
+    description: 'Search the text of all project files for a string or regex. Returns matching file paths, line numbers, and the matched line.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Text or regex to find' },
+        isRegex: { type: 'boolean', description: 'Treat query as regex (default false)' }
+      },
+      required: ['query']
+    }
+  },
+
   // Get Current State
   GET_CURRENT_STATE: {
     name: 'get_current_state',
@@ -384,6 +488,83 @@ const TOOL_SCHEMA = {
         }
       },
       required: ['content']
+    }
+  },
+
+  // Library management — Arduino library dependencies via arduino-cli
+  SEARCH_LIBRARIES: {
+    name: 'search_libraries',
+    description: 'Search the Arduino library index for installable libraries by name or keyword (e.g. "DHT sensor", "ArduinoJson", "Adafruit NeoPixel"). Returns matching libraries with their exact name, author, latest version, and a one-line description. Use this to find the correct library NAME before install_library when the user names a library loosely or you need a dependency for an #include.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Library name or keyword to search for' }
+      },
+      required: ['query']
+    }
+  },
+  INSTALL_LIBRARY: {
+    name: 'install_library',
+    description: 'Install an Arduino library so its headers become available to #include and compile. Use the exact library name from search_libraries (e.g. "ArduinoJson"). Optionally pin a version like "ArduinoJson@6.21.3"; omit the version for the latest. Call this when a sketch needs a library that is not installed (a compile error like "No such file: <X.h>" usually means the library for X must be installed).',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Exact library name, optionally "Name@version"' }
+      },
+      required: ['name']
+    }
+  },
+  LIST_LIBRARIES: {
+    name: 'list_libraries',
+    description: 'List the Arduino libraries currently installed, with their versions. Use this to check whether a dependency is already present before installing it, or to report what is available.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+  UNINSTALL_LIBRARY: {
+    name: 'uninstall_library',
+    description: 'Remove an installed Arduino library by its exact name. Use only when the user asks to remove a library or to resolve a version conflict.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Exact installed library name' }
+      },
+      required: ['name']
+    }
+  },
+
+  // Board core management — the platform packages that make a board compilable
+  SEARCH_BOARD_CORES: {
+    name: 'search_board_cores',
+    description: 'Search the Boards Manager for installable board cores (platform packages) by keyword (e.g. "esp32", "rp2040", "samd", "avr"). Returns core IDs like "esp32:esp32" or "arduino:avr" to use with install_board_core. A core is what makes a family of boards compilable — you need the right core installed before you can compile for that board.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Keyword to search cores for (e.g. "esp32")' }
+      },
+      required: ['query']
+    }
+  },
+  INSTALL_BOARD_CORE: {
+    name: 'install_board_core',
+    description: 'Install a board core (platform) so its boards can be compiled and uploaded. Use the exact core ID from search_board_cores (e.g. "esp32:esp32", "arduino:avr", "rp2040:rp2040"). A compile/upload error like "platform ... not installed" or an unknown FQBN means the core must be installed first. Cores are large downloads and can take a minute.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Exact core ID, e.g. "esp32:esp32"' }
+      },
+      required: ['id']
+    }
+  },
+  LIST_BOARD_CORES: {
+    name: 'list_board_cores',
+    description: 'List the board cores currently installed, with their versions. Use to check whether the core for a target board is already present before installing it.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: []
     }
   }
 };

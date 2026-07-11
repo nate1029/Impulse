@@ -103,7 +103,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI Agent methods
   ai: {
     setProvider: (providerName, apiKey, model) => ipcRenderer.invoke('ai:set-provider', providerName, apiKey, model),
-    processQuery: (query, context, mode) => ipcRenderer.invoke('ai:process-query', query, context, mode),
+    processQuery: (query, context, mode, attachments) => ipcRenderer.invoke('ai:process-query', query, context, mode, attachments),
+    cancel: () => ipcRenderer.invoke('ai:cancel'),
+    recordFeedback: (entry) => ipcRenderer.invoke('ai:record-feedback', entry),
     setModel: (modelId, manual) => ipcRenderer.invoke('ai:set-model', modelId, manual),
     getModelSuggestion: () => ipcRenderer.invoke('ai:get-model-suggestion'),
     pinModel: (modelId) => ipcRenderer.invoke('ai:pin-model', modelId),
@@ -116,7 +118,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     summarizeHistory: () => ipcRenderer.invoke('ai:summarize-history'),
     clearHistory: () => ipcRenderer.invoke('ai:clear-history'),
     getMemoryStats: () => ipcRenderer.invoke('ai:get-memory-stats'),
-    executeTool: (toolName, args) => ipcRenderer.invoke('ai:execute-tool', toolName, args)
+    executeTool: (toolName, args) => ipcRenderer.invoke('ai:execute-tool', toolName, args),
+    onToolEvent: (callback) => {
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('ai:tool-event', handler);
+      return () => ipcRenderer.removeListener('ai:tool-event', handler);
+    },
+    onTextChunk: (callback) => {
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('ai:text-chunk', handler);
+      return () => ipcRenderer.removeListener('ai:text-chunk', handler);
+    },
+    onPendingEdit: (callback) => {
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('ai:pending-edit', handler);
+      return () => ipcRenderer.removeListener('ai:pending-edit', handler);
+    },
+    decidePendingEdit: (id, accepted) => ipcRenderer.send('ai:pending-edit-decide', { id, accepted })
   },
   
   // API Key Management methods
@@ -208,8 +226,45 @@ contextBridge.exposeInMainWorld('electronAPI', {
     boards: () => ipcRenderer.invoke('plugins:boards')
   },
 
+  workspace: {
+    setRoot: (root) => ipcRenderer.invoke('workspace:set-root', root),
+    listFiles: () => ipcRenderer.invoke('workspace:list-files'),
+    readRules: () => ipcRenderer.invoke('workspace:read-rules'),
+    writeRules: (content) => ipcRenderer.invoke('workspace:write-rules', content),
+    onFileWritten: (cb) => ipcRenderer.on('workspace:file-written', (_e, data) => cb(data))
+  },
+
+  // Chat session history
+  chats: {
+    list: () => ipcRenderer.invoke('chat:list'),
+    get: (id) => ipcRenderer.invoke('chat:get', id),
+    create: (title, model) => ipcRenderer.invoke('chat:create', title, model),
+    append: (id, message) => ipcRenderer.invoke('chat:append', id, message),
+    rename: (id, title) => ipcRenderer.invoke('chat:rename', id, title),
+    remove: (id) => ipcRenderer.invoke('chat:delete', id)
+  },
+
+  // Google auth gate
+  auth: {
+    status: () => ipcRenderer.invoke('auth:status'),
+    signIn: () => ipcRenderer.invoke('auth:sign-in'),
+    signOut: () => ipcRenderer.invoke('auth:sign-out')
+  },
+
   app: {
     quit: () => ipcRenderer.send('app:quit')
+  },
+
+  // Custom titlebar window controls
+  win: {
+    minimize: () => ipcRenderer.send('window:minimize'),
+    maximizeToggle: () => ipcRenderer.send('window:maximize-toggle'),
+    close: () => ipcRenderer.send('window:close'),
+    onMaximizedChange: (callback) => {
+      const handler = (event, maximized) => callback(maximized);
+      ipcRenderer.on('window:maximized-change', handler);
+      return () => ipcRenderer.removeListener('window:maximized-change', handler);
+    }
   },
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   menu: {

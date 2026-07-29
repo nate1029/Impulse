@@ -1,0 +1,5 @@
+Built Impulse — the first AI agent that actually flashes your Arduino board and reads back the serial to prove it works.
+
+No more copy-paste-fail loops. Prompt → sketch → compile → auto-install libs → upload → verify on hardware. All autonomous.
+
+github.com/nate1029/Impulse

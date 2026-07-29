@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #131211;
+        font-family: "Inter", -apple-system, "Segoe UI", sans-serif;
+        color: #efeae0;
+      }
+      .mono {
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-feature-settings: "ss01" 1, "calt" 1;
+      }
+
+      /* ============ SCENE 1: prompt ============ */
+      .scene-prompt {
+        position: absolute; inset: 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 60px;
+      }
+      .wordmark-row {
+        display: flex; align-items: center; gap: 18px;
+        font-family: "JetBrains Mono", monospace;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        font-size: 34px;
+        color: #efeae0;
+      }
+      .wordmark-row svg { color: #EA4A0F; }
+      .prompt-input {
+        width: 900px;
+        padding: 32px 40px;
+        background: #1a1815;
+        border: 1px solid rgba(239, 234, 224, 0.16);
+        border-radius: 12px;
+        box-shadow: 8px 8px 0 rgba(28, 26, 23, 0.6), 0 12px 32px rgba(0,0,0,0.4);
+        display: flex; align-items: center; gap: 14px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 40px;
+        color: #efeae0;
+      }
+      .prompt-caret {
+        display: inline-block; width: 14px; height: 42px;
+        background: #EA4A0F;
+        animation: caret-blink 0.9s steps(2, end) infinite;
+      }
+      @keyframes caret-blink { 50% { opacity: 0; } }
+      .prompt-chevron { color: #EA4A0F; font-weight: 700; }
+
+      /* ============ SCENE 2: editor ============ */
+      .scene-editor {
+        position: absolute; inset: 0;
+        display: flex; flex-direction: column;
+        background: #131211;
+      }
+      .editor-header {
+        display: flex; align-items: center; gap: 12px;
+        padding: 22px 40px;
+        background: #181614;
+        border-bottom: 1px solid rgba(239,234,224,0.08);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 22px;
+        color: #a8a294;
+      }
+      .file-tab {
+        display: inline-flex; align-items: center; gap: 10px;
+        padding: 10px 20px;
+        background: #131211;
+        border: 1px solid rgba(239,234,224,0.12);
+        border-radius: 8px 8px 0 0;
+        color: #efeae0;
+      }
+      .file-tab-dot { width: 8px; height: 8px; background: #EA4A0F; border-radius: 50%; }
+      .editor-body {
+        flex: 1;
+        padding: 60px 80px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 34px;
+        line-height: 1.6;
+        color: #efeae0;
+        position: relative;
+        overflow: hidden;
+      }
+      .code-line { display: block; white-space: pre; opacity: 0; }
+      .kw { color: #EA4A0F; }
+      .fn { color: #E8A410; }
+      .num { color: #7C63D8; }
+      .str { color: #1FA85C; }
+
+      /* ============ SCENE 3: pipeline ============ */
+      .scene-pipeline {
+        position: absolute; inset: 0;
+        display: grid; grid-template-columns: 1fr 1fr;
+        gap: 80px; padding: 120px 100px;
+      }
+      .editor-mini {
+        background: #181614;
+        border: 1px solid rgba(239,234,224,0.12);
+        border-radius: 12px;
+        box-shadow: 8px 8px 0 rgba(0,0,0,0.4);
+        padding: 40px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 20px;
+        line-height: 1.55;
+        color: #efeae0;
+        overflow: hidden;
+      }
+      .editor-mini .header-bar {
+        font-size: 16px; color: #a8a294; margin-bottom: 24px;
+        display: flex; align-items: center; gap: 10px;
+      }
+      .editor-mini .dot { width: 8px; height: 8px; border-radius: 50%; background: #EA4A0F; }
+      .chip-stack {
+        display: flex; flex-direction: column; gap: 28px; justify-content: center;
+      }
+      .chip {
+        display: flex; align-items: center; gap: 22px;
+        padding: 28px 34px;
+        background: #1a1815;
+        border: 1px solid rgba(239,234,224,0.14);
+        border-radius: 12px;
+        box-shadow: 6px 6px 0 rgba(0,0,0,0.5);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 26px;
+        color: #efeae0;
+        opacity: 0;
+        transform: translateX(60px);
+      }
+      .chip-status {
+        width: 20px; height: 20px; border-radius: 50%;
+        background: rgba(239,234,224,0.25);
+        transition: background 0.3s;
+      }
+      .chip.done .chip-status { background: #1FA85C; box-shadow: 0 0 20px rgba(31,168,92,0.5); }
+      .chip-label { flex: 1; letter-spacing: 0.02em; }
+      .chip-value { color: #a8a294; font-size: 22px; }
+      .chip.done .chip-value { color: #1FA85C; }
+      .progress-bar {
+        width: 100%; height: 6px; margin-top: 12px;
+        background: rgba(239,234,224,0.1); border-radius: 3px; overflow: hidden;
+      }
+      .progress-fill { height: 100%; width: 0%; background: #EA4A0F; }
+
+      /* ============ SCENE 4: serial ============ */
+      .scene-serial {
+        position: absolute; inset: 0;
+        display: flex; flex-direction: column;
+        background: #0e0d0c;
+      }
+      .serial-header {
+        padding: 26px 60px;
+        background: #181614;
+        border-bottom: 1px solid rgba(239,234,224,0.1);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 22px;
+        color: #a8a294;
+        display: flex; align-items: center; gap: 20px;
+      }
+      .serial-header .live-dot {
+        width: 12px; height: 12px; border-radius: 50%; background: #1FA85C;
+        box-shadow: 0 0 12px #1FA85C;
+      }
+      .serial-body {
+        flex: 1;
+        padding: 80px 100px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 42px;
+        line-height: 1.55;
+        color: #efeae0;
+        position: relative;
+      }
+      .serial-line { display: block; opacity: 0; }
+      .serial-line .lbl { color: #a8a294; }
+      .serial-line .ok { color: #1FA85C; }
+      .verified-chip {
+        position: absolute; bottom: 80px; right: 100px;
+        padding: 28px 44px;
+        background: #EA4A0F;
+        color: #fffaf5;
+        font-family: "JetBrains Mono", monospace;
+        font-weight: 700;
+        font-size: 44px;
+        letter-spacing: 0.04em;
+        border-radius: 12px;
+        box-shadow: 8px 8px 0 rgba(0,0,0,0.6), 0 0 60px rgba(234,74,15,0.4);
+        display: flex; align-items: center; gap: 18px;
+        opacity: 0; transform: scale(0.7);
+      }
+
+      /* ============ SCENE 5: outro ============ */
+      .scene-outro {
+        position: absolute; inset: 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 42px;
+        background: #f3f1ec;
+        color: #1c1a17;
+      }
+      .outro-mark { color: #EA4A0F; }
+      .outro-title {
+        font-family: "JetBrains Mono", monospace;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        font-size: 92px;
+      }
+      .outro-tagline {
+        font-family: "Inter", sans-serif;
+        font-weight: 500;
+        font-size: 44px;
+        color: #5d584e;
+        letter-spacing: 0.01em;
+      }
+      .outro-cta {
+        margin-top: 12px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 30px;
+        color: #EA4A0F;
+        padding: 18px 32px;
+        border: 2px solid #EA4A0F;
+        border-radius: 8px;
+        box-shadow: 6px 6px 0 rgba(28,26,23,0.15);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="20"
+      data-width="1920"
+      data-height="1080"
+    >
+      <!-- ============ SCENE 1: prompt (0 - 3.5s) ============ -->
+      <div id="scene-prompt" class="scene-prompt clip" data-start="0" data-duration="3.5" data-track-index="1">
+        <div class="wordmark-row">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12h4l3-8 4 16 3-8h6" />
+          </svg>
+          <span>IMPULSE</span>
+        </div>
+        <div class="prompt-input">
+          <span class="prompt-chevron">&gt;</span>
+          <span id="prompt-text"></span>
+          <span class="prompt-caret"></span>
+        </div>
+      </div>
+
+      <!-- ============ SCENE 2: editor (3.5 - 8s) ============ -->
+      <div id="scene-editor" class="scene-editor clip" data-start="3.5" data-duration="4.5" data-track-index="2">
+        <div class="editor-header">
+          <div class="file-tab">
+            <span class="file-tab-dot"></span>
+            <span>blink.ino</span>
+          </div>
+          <span style="color:#5d584e">·</span>
+          <span>Arduino Uno · COM3</span>
+        </div>
+        <div class="editor-body">
+          <span class="code-line" id="cl-1"><span class="kw">void</span> <span class="fn">setup</span>() {</span>
+          <span class="code-line" id="cl-2">  <span class="fn">pinMode</span>(<span class="num">2</span>, OUTPUT);</span>
+          <span class="code-line" id="cl-3">}</span>
+          <span class="code-line" id="cl-4"> </span>
+          <span class="code-line" id="cl-5"><span class="kw">void</span> <span class="fn">loop</span>() {</span>
+          <span class="code-line" id="cl-6">  <span class="fn">digitalWrite</span>(<span class="num">2</span>, HIGH);</span>
+          <span class="code-line" id="cl-7">  <span class="fn">delay</span>(<span class="num">500</span>);</span>
+          <span class="code-line" id="cl-8">  <span class="fn">digitalWrite</span>(<span class="num">2</span>, LOW);</span>
+          <span class="code-line" id="cl-9">  <span class="fn">delay</span>(<span class="num">500</span>);</span>
+          <span class="code-line" id="cl-10">}</span>
+        </div>
+      </div>
+
+      <!-- ============ SCENE 3: pipeline (8 - 12s) ============ -->
+      <div id="scene-pipeline" class="scene-pipeline clip" data-start="8" data-duration="4" data-track-index="3">
+        <div class="editor-mini">
+          <div class="header-bar"><span class="dot"></span>blink.ino</div>
+<pre style="margin:0"><span class="kw">void</span> <span class="fn">setup</span>() {
+  <span class="fn">pinMode</span>(<span class="num">2</span>, OUTPUT);
+}
+
+<span class="kw">void</span> <span class="fn">loop</span>() {
+  <span class="fn">digitalWrite</span>(<span class="num">2</span>, HIGH);
+  <span class="fn">delay</span>(<span class="num">500</span>);
+  <span class="fn">digitalWrite</span>(<span class="num">2</span>, LOW);
+  <span class="fn">delay</span>(<span class="num">500</span>);
+}</pre>
+        </div>
+        <div class="chip-stack">
+          <div class="chip" id="chip-1">
+            <span class="chip-status"></span>
+            <span class="chip-label">COMPILE</span>
+            <span class="chip-value" id="chip-1-val">building…</span>
+          </div>
+          <div class="chip" id="chip-2">
+            <span class="chip-status"></span>
+            <span class="chip-label">INSTALL LIB</span>
+            <span class="chip-value" id="chip-2-val">Adafruit_MPU6050</span>
+          </div>
+          <div class="chip" id="chip-3" style="flex-direction:column;align-items:stretch;gap:14px">
+            <div style="display:flex;align-items:center;gap:22px">
+              <span class="chip-status"></span>
+              <span class="chip-label">UPLOAD</span>
+              <span class="chip-value" id="chip-3-val">COM3</span>
+            </div>
+            <div class="progress-bar"><div class="progress-fill" id="prog-fill"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ SCENE 4: serial (12 - 17s) ============ -->
+      <div id="scene-serial" class="scene-serial clip" data-start="12" data-duration="5" data-track-index="4">
+        <div class="serial-header">
+          <span class="live-dot"></span>
+          <span>Serial Monitor · COM3 · 115200 baud</span>
+        </div>
+        <div class="serial-body">
+          <span class="serial-line" id="sl-1"><span class="lbl">&gt;</span> MPU6050 <span class="ok">OK</span></span>
+          <span class="serial-line" id="sl-2"><span class="lbl">&gt;</span> ax=0.02  ay=-0.01  az=0.98</span>
+          <span class="serial-line" id="sl-3"><span class="lbl">&gt;</span> ax=0.01  ay=-0.02  az=0.99</span>
+          <span class="serial-line" id="sl-4"><span class="lbl">&gt;</span> ax=0.03  ay=-0.01  az=0.98</span>
+          <div class="verified-chip" id="verified">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <span>VERIFIED</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ SCENE 5: outro (17 - 20s) ============ -->
+      <div id="scene-outro" class="scene-outro clip" data-start="17" data-duration="3" data-track-index="5">
+        <svg class="outro-mark" width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12h4l3-8 4 16 3-8h6" />
+        </svg>
+        <div class="outro-title">IMPULSE</div>
+        <div class="outro-tagline">The AI that touches the board.</div>
+        <div class="outro-cta">github.com/nate1029/Impulse</div>
+      </div>
+
+      <!-- ============ AUDIO ============ -->
+      <audio id="a-bed" class="clip" data-start="0" data-duration="20" data-track-index="10" data-volume="0.28" src="assets/music/bed.mp3"></audio>
+      <audio id="a-typing" class="clip" data-start="0.4" data-duration="1.6" data-track-index="11" data-volume="0.55" src="assets/sfx/typing.mp3"></audio>
+      <audio id="a-chip-1" class="clip" data-start="8.9" data-duration="0.4" data-track-index="12" data-volume="0.7" src="assets/sfx/click-soft.mp3"></audio>
+      <audio id="a-chip-2" class="clip" data-start="9.7" data-duration="0.4" data-track-index="12" data-volume="0.7" src="assets/sfx/click-soft.mp3"></audio>
+      <audio id="a-chip-3" class="clip" data-start="11.3" data-duration="0.4" data-track-index="12" data-volume="0.85" src="assets/sfx/click-soft.mp3"></audio>
+      <audio id="a-serial-1" class="clip" data-start="12.4" data-duration="0.3" data-track-index="13" data-volume="0.5" src="assets/sfx/key-press.mp3"></audio>
+      <audio id="a-serial-2" class="clip" data-start="13.1" data-duration="0.3" data-track-index="13" data-volume="0.5" src="assets/sfx/key-press.mp3"></audio>
+      <audio id="a-serial-3" class="clip" data-start="13.8" data-duration="0.3" data-track-index="13" data-volume="0.5" src="assets/sfx/key-press.mp3"></audio>
+      <audio id="a-serial-4" class="clip" data-start="14.5" data-duration="0.3" data-track-index="13" data-volume="0.5" src="assets/sfx/key-press.mp3"></audio>
+      <audio id="a-verified" class="clip" data-start="15.4" data-duration="1.5" data-track-index="14" data-volume="0.9" src="assets/sfx/chime.mp3"></audio>
+      <audio id="a-outro-pop" class="clip" data-start="17.2" data-duration="0.6" data-track-index="15" data-volume="0.55" src="assets/sfx/pop.mp3"></audio>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      // ============ SCENE 1: prompt (0 - 3.5s) ============
+      // Type "blink an LED on GPIO 2" — 22 chars over 1.6s
+      const promptText = "blink an LED on GPIO 2";
+      const typeStart = 0.4;
+      const typeDur = 1.6;
+      for (let i = 0; i <= promptText.length; i++) {
+        tl.call(() => {
+          const el = document.getElementById("prompt-text");
+          if (el) el.textContent = promptText.slice(0, i);
+        }, [], typeStart + (i / promptText.length) * typeDur);
+      }
+      // ============ SCENE 2: editor (3.5 - 8s) ============
+      // Stream code lines 3.9 → 6.9 (3s for 10 lines, 0.3s per line)
+      for (let i = 1; i <= 10; i++) {
+        tl.to("#cl-" + i, { opacity: 1, duration: 0.18 }, 3.9 + (i - 1) * 0.28);
+      }
+      // ============ SCENE 3: pipeline (8 - 12s) ============
+      // Chip 1: compile — arrives 8.3s, flips green 8.9s
+      tl.to("#chip-1", { opacity: 1, x: 0, duration: 0.4, ease: "back.out(1.4)" }, 8.3);
+      tl.call(() => {
+        document.getElementById("chip-1")?.classList.add("done");
+        const v = document.getElementById("chip-1-val");
+        if (v) v.textContent = "✓ 24 kb / 32 kb";
+      }, [], 8.9);
+      // Chip 2: install lib — arrives 9.0s, flips green 9.7s
+      tl.to("#chip-2", { opacity: 1, x: 0, duration: 0.4, ease: "back.out(1.4)" }, 9.0);
+      tl.call(() => {
+        document.getElementById("chip-2")?.classList.add("done");
+        const v = document.getElementById("chip-2-val");
+        if (v) v.textContent = "✓ installed";
+      }, [], 9.7);
+      // Chip 3: upload — arrives 9.9s, progress fills 10.0 → 11.2, flips green 11.3
+      tl.to("#chip-3", { opacity: 1, x: 0, duration: 0.4, ease: "back.out(1.4)" }, 9.9);
+      tl.to("#prog-fill", { width: "100%", duration: 1.3, ease: "power2.inOut" }, 10.0);
+      tl.call(() => {
+        document.getElementById("chip-3")?.classList.add("done");
+        const v = document.getElementById("chip-3-val");
+        if (v) v.textContent = "✓ flashed";
+      }, [], 11.3);
+      // ============ SCENE 4: serial (12 - 17s) ============
+      // Serial lines type in 12.4 → 15
+      tl.to("#sl-1", { opacity: 1, duration: 0.2 }, 12.4);
+      tl.to("#sl-2", { opacity: 1, duration: 0.2 }, 13.1);
+      tl.to("#sl-3", { opacity: 1, duration: 0.2 }, 13.8);
+      tl.to("#sl-4", { opacity: 1, duration: 0.2 }, 14.5);
+      // Verified slam — beat-locked at 15.4
+      tl.to("#verified", { opacity: 1, scale: 1, duration: 0.5, ease: "back.out(2)" }, 15.4);
+      // ============ SCENE 5: outro (17 - 20s) ============
+      tl.from("#scene-outro .outro-mark", { scale: 0.7, opacity: 0, duration: 0.6, ease: "back.out(1.8)" }, 17.2);
+      tl.from("#scene-outro .outro-title", { y: 30, opacity: 0, duration: 0.5 }, 17.6);
+      tl.from("#scene-outro .outro-tagline", { y: 20, opacity: 0, duration: 0.5 }, 17.9);
+      tl.from("#scene-outro .outro-cta", { y: 20, opacity: 0, duration: 0.5 }, 18.2);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
